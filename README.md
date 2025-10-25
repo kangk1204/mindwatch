@@ -52,7 +52,7 @@ source .venv/bin/activate
 
 # Upgrade pip & install runtime deps
 pip install --upgrade pip
-pip install pandas numpy scikit-learn optuna lightgbm xgboost catboost matplotlib torch
+pip install pandas numpy scikit-learn optuna lightgbm xgboost catboost matplotlib torch pytorch-forcasting
 ```
 
 If you have a `requirements.txt`, simply run `pip install -r requirements.txt`.
