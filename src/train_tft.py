@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -102,12 +103,37 @@ def set_seed(seed: int) -> None:
     np.random.seed(seed)
 
 
+def resolve_normalized_path(directory: str, filename: str) -> Optional[str]:
+    """Return an existing filesystem path regardless of Unicode normalization."""
+    candidate = os.path.join(directory, filename)
+    if os.path.exists(candidate):
+        return candidate
+
+    normalized_forms = {
+        unicodedata.normalize("NFC", filename),
+        unicodedata.normalize("NFD", filename),
+    }
+    for norm_name in normalized_forms:
+        candidate = os.path.join(directory, norm_name)
+        if os.path.exists(candidate):
+            return candidate
+
+    target_norm = unicodedata.normalize("NFC", filename)
+    for entry in os.listdir(directory):
+        if unicodedata.normalize("NFC", entry) == target_norm:
+            candidate = os.path.join(directory, entry)
+            if os.path.exists(candidate):
+                return candidate
+    return None
+
+
 def load_label_frames() -> pd.DataFrame:
     frames = []
     for filename, sheet, wave in LABEL_SHEETS:
-        path = os.path.join(LABEL_DIR, filename)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Label file missing: {path}")
+        expected_path = os.path.join(LABEL_DIR, filename)
+        path = resolve_normalized_path(LABEL_DIR, filename)
+        if path is None:
+            raise FileNotFoundError(f"Label file missing: {expected_path}")
         df = pd.read_excel(path, sheet_name=sheet)
         df["survey_wave"] = wave
         frames.append(df)
@@ -127,9 +153,10 @@ def load_label_frames() -> pd.DataFrame:
 def load_hourly_sensor_frames() -> Dict[str, pd.DataFrame]:
     sensor_frames: Dict[str, pd.DataFrame] = {}
     for filename, feature_name in SENSOR_FILE_MAP.items():
-        path = os.path.join(INPUT_DIR, filename)
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Sensor file missing: {path}")
+        expected_path = os.path.join(INPUT_DIR, filename)
+        path = resolve_normalized_path(INPUT_DIR, filename)
+        if path is None:
+            raise FileNotFoundError(f"Sensor file missing: {expected_path}")
         df = pd.read_csv(path)
         if "-" not in df.columns:
             raise ValueError(f"Timestamp column '-' not found in {filename}")
