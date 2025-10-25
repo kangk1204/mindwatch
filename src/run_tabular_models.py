@@ -239,7 +239,21 @@ def build_feature_dataframe(
     final_df = final_df[final_df["target_binary"].notna()]
     final_df["target_binary"] = final_df["target_binary"].astype(int)
     return final_df
-def prepare_feature_context(dataset: pd.DataFrame, split_seed: int = 42) -> Dict[str, object]:
+def prepare_feature_context(
+    dataset: pd.DataFrame,
+    split_seed: int = 42,
+    exclude_prev_survey: bool = False,
+) -> Dict[str, object]:
+    if exclude_prev_survey:
+        drop_cols = [
+            col
+            for col in dataset.columns
+            if col.startswith("prev_")
+            or col.endswith("_prev_wave")
+            or col.endswith("_delta_prev_wave")
+        ]
+        dataset = dataset.drop(columns=drop_cols, errors="ignore")
+
     columns = dataset.columns
 
     static_cols = [col for col in STATIC_REALS if col in columns]

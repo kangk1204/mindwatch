@@ -73,11 +73,16 @@ def main() -> None:
     parser.add_argument("--cv-folds", type=int, default=5)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--strategy", type=str, default="HGB_optuna_best")
+    parser.add_argument("--exclude-prev-survey", action="store_true", help="Drop all prev_* and cross-wave survey features for ablation.")
     parser.add_argument("--output-prefix", type=str, default=None)
     args = parser.parse_args()
 
     dataset = build_feature_dataframe(history_hours=args.history_hours)
-    context = prepare_feature_context(dataset, split_seed=args.split_seed)
+    context = prepare_feature_context(
+        dataset,
+        split_seed=args.split_seed,
+        exclude_prev_survey=args.exclude_prev_survey,
+    )
     strategies = build_default_strategies(context)
     strategy = find_strategy(args.strategy, tuple(strategies))
 
@@ -103,7 +108,8 @@ def main() -> None:
     default_metrics = compute_threshold_metrics(y_true, y_scores, threshold=0.5)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    prefix = args.output_prefix or f"{strategy.name}_{timestamp}"
+    scenario = "no_prev" if args.exclude_prev_survey else "with_prev"
+    prefix = args.output_prefix or f"{strategy.name}_{scenario}_{timestamp}"
 
     os.makedirs("plots", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
@@ -137,6 +143,7 @@ def main() -> None:
         "best_f2": best_f2,
         "threshold_0_5": default_metrics,
         "roc_plot": roc_path,
+        "scenario": scenario,
     }
 
     output_path = os.path.join("logs", f"evaluation_{prefix}.json")

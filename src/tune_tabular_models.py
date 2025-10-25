@@ -192,6 +192,7 @@ def main() -> None:
     parser.add_argument("--direction", choices=["maximize", "minimize"], default="maximize")
     parser.add_argument("--n-jobs", type=int, default=1, help="Parallel Optuna workers.")
     parser.add_argument("--use-gpu", action="store_true", help="Enable GPU-accelerated training when supported (XGB/LGBM/CatBoost).")
+    parser.add_argument("--exclude-prev-survey", action="store_true", help="Drop prev_* survey features before tuning.")
     parser.add_argument("--seed", type=int, default=42, help="Sampler seed for Optuna.")
     parser.add_argument("--split-seed", type=int, default=42, help="Random seed for train/validation split.")
     parser.add_argument("--block-validation", action="store_true", help="Evaluate best trial on time-block holdout.")
@@ -201,7 +202,11 @@ def main() -> None:
         raise ValueError("Direction must be 'maximize' for ROC-AUC tuning.")
 
     dataset = build_feature_dataframe(history_hours=args.history_hours)
-    context = prepare_feature_context(dataset, split_seed=args.split_seed)
+    context = prepare_feature_context(
+        dataset,
+        split_seed=args.split_seed,
+        exclude_prev_survey=args.exclude_prev_survey,
+    )
     train_idx = context["train_idx"]  # type: ignore[index]
     val_idx = context["val_idx"]  # type: ignore[index]
 
