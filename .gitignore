@@ -1,0 +1,15 @@
+# sensitive data
+00_input_data/
+00_label_data/
+
+# outputs / artifacts
+logs/
+plots/
+lightning_logs/
+*.png
+*.json
+
+# venv / cache
+.venv/
+__pycache__/
+*.pyc
