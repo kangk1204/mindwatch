@@ -146,3 +146,14 @@ The JSON includes ROC-AUC, ROC curve samples, best-F1/F2 thresholds, MCC, accura
 ---
 
 Questions or issues? Open a private GitHub issue in the `mindwatch` repo or contact the maintainers. Happy modeling! 🎯
+### Tabular deep learning (MLP / TabNet)
+Requires PyTorch (already used by TFT) and optionally `pytorch-tabnet` (`pip install pytorch-tabnet`).
+```bash
+python src/train_tabular_dl.py \
+  --model-type mlp \
+  --history-hours 240 \
+  --epochs 50 \
+  --batch-size 256 \
+  --exclude-prev-survey  # optional ablation
+```
+Use `--model-type tabnet` to switch architectures; `--use-gpu` is not needed because Torch auto-detects CUDA. Results are saved to `logs/tabular_<model>_<scenario>_<timestamp>.json`.
