@@ -15,8 +15,25 @@ from run_tabular_models import (
 )
 
 
-def build_hgb_top120(context: Dict[str, object], use_gpu: bool = False, trial: Optional[optuna.trial.Trial] = None, params: Optional[Dict[str, float]] = None) -> StrategyConfig:
-    feature_names = context["top_feature_names"]  # type: ignore[index]
+def has_xgb_gpu_support() -> bool:
+    try:
+        from xgboost.core import _has_cuda_support  # type: ignore
+
+        return bool(_has_cuda_support())
+    except Exception:
+        return False
+
+
+def build_hgb_top120(
+    context: Dict[str, object],
+    use_gpu: bool = False,
+    trial: Optional[optuna.trial.Trial] = None,
+    params: Optional[Dict[str, float]] = None,
+) -> StrategyConfig:
+    feature_pool = context["top_feature_pool"]  # type: ignore[index]
+    top_k_max = context.get("top_k_max", len(feature_pool))  # type: ignore[arg-type]
+    top_k_min = context.get("top_k_min", 1)  # type: ignore[arg-type]
+    top_k_default = context.get("top_k_default", len(feature_pool))  # type: ignore[arg-type]
     param_keys = [
         "learning_rate",
         "max_leaf_nodes",
@@ -27,6 +44,7 @@ def build_hgb_top120(context: Dict[str, object], use_gpu: bool = False, trial: O
         "max_bins",
     ]
     if trial is not None:
+        top_k = trial.suggest_int("top_k", int(top_k_min), int(top_k_max))
         config_params = {
             "loss": "log_loss",
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
@@ -42,6 +60,7 @@ def build_hgb_top120(context: Dict[str, object], use_gpu: bool = False, trial: O
         use_weights = trial.suggest_categorical("use_sample_weights", [True, False])
         use_quantile = trial.suggest_categorical("use_quantile_transform", [False, True])
     elif params is not None:
+        top_k = int(params.get("top_k", top_k_default))
         config_params = {
             "loss": "log_loss",
             "class_weight": "balanced",
@@ -54,6 +73,8 @@ def build_hgb_top120(context: Dict[str, object], use_gpu: bool = False, trial: O
     else:
         raise ValueError("Either trial or params must be provided")
 
+    top_k = max(int(top_k_min), min(int(top_k), int(top_k_max)))
+    feature_names = feature_pool[:top_k]
     transform = "quantile" if use_quantile else None
     return StrategyConfig(
         name="HGB_top120_optuna",
@@ -65,8 +86,16 @@ def build_hgb_top120(context: Dict[str, object], use_gpu: bool = False, trial: O
     )
 
 
-def build_lgbm_full(context: Dict[str, object], use_gpu: bool = False, trial: Optional[optuna.trial.Trial] = None, params: Optional[Dict[str, float]] = None) -> StrategyConfig:
-    feature_names = context["all_features"]  # type: ignore[index]
+def build_lgbm_full(
+    context: Dict[str, object],
+    use_gpu: bool = False,
+    trial: Optional[optuna.trial.Trial] = None,
+    params: Optional[Dict[str, float]] = None,
+) -> StrategyConfig:
+    all_features = context["all_features"]  # type: ignore[index]
+    feature_pool = context["top_feature_pool"]  # type: ignore[index]
+    top_k_max = context.get("top_k_max", len(feature_pool))  # type: ignore[arg-type]
+    top_k_min = context.get("top_k_min", 1)  # type: ignore[arg-type]
     param_keys = [
         "learning_rate",
         "num_leaves",
@@ -87,6 +116,13 @@ def build_lgbm_full(context: Dict[str, object], use_gpu: bool = False, trial: Op
     if use_gpu:
         base_params.update(dict(device="gpu"))
     if trial is not None:
+        feature_mode = trial.suggest_categorical("feature_mode", ["topk", "all"])
+        if feature_mode == "topk":
+            top_k = trial.suggest_int("top_k", int(top_k_min), int(top_k_max))
+            feature_names = feature_pool[: max(1, min(int(top_k), len(feature_pool)))]
+        else:
+            top_k = len(feature_pool)
+            feature_names = all_features
         config_params = dict(base_params)
         config_params.update(
             learning_rate=trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
@@ -100,6 +136,12 @@ def build_lgbm_full(context: Dict[str, object], use_gpu: bool = False, trial: Op
         )
         use_weights = trial.suggest_categorical("use_sample_weights", [True, False])
     elif params is not None:
+        feature_mode = params.get("feature_mode", "topk")
+        if feature_mode == "all":
+            feature_names = all_features
+        else:
+            top_k = int(params.get("top_k", top_k_max))
+            feature_names = feature_pool[: max(1, min(int(top_k), len(feature_pool)))]
         config_params = dict(base_params)
         for key in param_keys:
             config_params[key] = params[key]
@@ -117,8 +159,16 @@ def build_lgbm_full(context: Dict[str, object], use_gpu: bool = False, trial: Op
     )
 
 
-def build_xgb_full(context: Dict[str, object], use_gpu: bool = False, trial: Optional[optuna.trial.Trial] = None, params: Optional[Dict[str, float]] = None) -> StrategyConfig:
-    feature_names = context["all_features"]  # type: ignore[index]
+def build_xgb_full(
+    context: Dict[str, object],
+    use_gpu: bool = False,
+    trial: Optional[optuna.trial.Trial] = None,
+    params: Optional[Dict[str, float]] = None,
+) -> StrategyConfig:
+    all_features = context["all_features"]  # type: ignore[index]
+    feature_pool = context["top_feature_pool"]  # type: ignore[index]
+    top_k_max = context.get("top_k_max", len(feature_pool))  # type: ignore[arg-type]
+    top_k_min = context.get("top_k_min", 1)  # type: ignore[arg-type]
     param_keys = [
         "learning_rate",
         "max_depth",
@@ -130,16 +180,26 @@ def build_xgb_full(context: Dict[str, object], use_gpu: bool = False, trial: Opt
         "n_estimators",
         "gamma",
     ]
+    enable_gpu = use_gpu and has_xgb_gpu_support()
+    if use_gpu and not enable_gpu:
+        print("[WARN] XGBoost GPU requested but not available; falling back to CPU hist tree method.")
     base_params = dict(
         objective="binary:logistic",
         eval_metric="auc",
         random_state=42,
-        tree_method="hist",
+        tree_method="gpu_hist" if enable_gpu else "hist",
         n_jobs=-1,
     )
-    if use_gpu:
-        base_params.update(dict(tree_method="gpu_hist", predictor="gpu_predictor"))
+    if enable_gpu:
+        base_params.update(dict(predictor="gpu_predictor"))
     if trial is not None:
+        feature_mode = trial.suggest_categorical("feature_mode", ["topk", "all"])
+        if feature_mode == "topk":
+            top_k = trial.suggest_int("top_k", int(top_k_min), int(top_k_max))
+            feature_names = feature_pool[: max(1, min(int(top_k), len(feature_pool)))]
+        else:
+            top_k = len(feature_pool)
+            feature_names = all_features
         config_params = dict(base_params)
         config_params.update(
             learning_rate=trial.suggest_float("learning_rate", 0.005, 0.2, log=True),
@@ -155,6 +215,12 @@ def build_xgb_full(context: Dict[str, object], use_gpu: bool = False, trial: Opt
         )
         use_weights = trial.suggest_categorical("use_sample_weights", [True, False])
     elif params is not None:
+        feature_mode = params.get("feature_mode", "topk")
+        if feature_mode == "all":
+            feature_names = all_features
+        else:
+            top_k = int(params.get("top_k", top_k_max))
+            feature_names = feature_pool[: max(1, min(int(top_k), len(feature_pool)))]
         config_params = dict(base_params)
         for key in param_keys:
             config_params[key] = params[key]
@@ -196,6 +262,8 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42, help="Sampler seed for Optuna.")
     parser.add_argument("--split-seed", type=int, default=42, help="Random seed for train/validation split.")
     parser.add_argument("--block-validation", action="store_true", help="Evaluate best trial on time-block holdout.")
+    parser.add_argument("--top-k-features", type=int, default=120, help="Number of highest-importance features kept for top-k feature sets.")
+    parser.add_argument("--top-k-min", type=int, default=None, help="Minimum number of features allowed when top-k is tuned.")
     args = parser.parse_args()
 
     if args.direction != "maximize":
@@ -206,6 +274,8 @@ def main() -> None:
         dataset,
         split_seed=args.split_seed,
         exclude_prev_survey=args.exclude_prev_survey,
+        top_k_features=args.top_k_features,
+        top_k_min=args.top_k_min,
     )
     train_idx = context["train_idx"]  # type: ignore[index]
     val_idx = context["val_idx"]  # type: ignore[index]
