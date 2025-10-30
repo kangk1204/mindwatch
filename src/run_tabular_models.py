@@ -1,7 +1,20 @@
 import argparse
 import os
+import time
+import warnings
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
+
+
+def format_seconds(seconds: float) -> str:
+    """Return human-readable formatting for elapsed seconds."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {secs:.0f}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{int(hours)}h {int(minutes)}m {secs:.0f}s"
 
 import numpy as np
 import pandas as pd
@@ -16,6 +29,18 @@ import xgboost as xgb
 
 try:
     import lightgbm as lgb  # type: ignore
+    warnings.filterwarnings(
+        "ignore",
+        message="No further splits with positive gain, best gain: -inf",
+        category=UserWarning,
+        module="lightgbm",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message="Stopped training because there are no more leaves that meet the split requirements",
+        category=UserWarning,
+        module="lightgbm",
+    )
 except ImportError:  # pragma: no cover - optional dependency
     lgb = None
 
@@ -57,6 +82,36 @@ def merge_feature_lists(columns: Iterable[str], *feature_groups: Iterable[str]) 
     return merged
 
 
+def participant_stratified_split(
+    dataset: pd.DataFrame,
+    test_size: float,
+    split_seed: int,
+) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]]]:
+    entity_table = (
+        dataset.reset_index()
+        .drop_duplicates(subset=["ID", "survey_wave"])
+        [["ID", "survey_wave", "target_binary"]]
+    )
+    participant_labels = entity_table.groupby("ID")["target_binary"].max()
+    stratify_labels: Optional[np.ndarray]
+    if participant_labels.nunique() > 1:
+        stratify_labels = participant_labels.values
+    else:
+        stratify_labels = None
+    participant_ids = participant_labels.index.to_numpy()
+    train_ids, val_ids = train_test_split(
+        participant_ids,
+        test_size=test_size,
+        random_state=split_seed,
+        stratify=stratify_labels,
+    )
+    train_entities = entity_table[entity_table["ID"].isin(train_ids)][["ID", "survey_wave"]]
+    val_entities = entity_table[entity_table["ID"].isin(val_ids)][["ID", "survey_wave"]]
+    train_idx = list(train_entities.itertuples(index=False, name=None))
+    val_idx = list(val_entities.itertuples(index=False, name=None))
+    return train_idx, val_idx
+
+
 def build_feature_dataframe(
     history_hours: int,
     windows: Tuple[int, ...] = (6, 12, 24, 48, 72, 240),
@@ -86,6 +141,15 @@ def build_feature_dataframe(
         .set_index(["ID", "survey_wave"])
     )
     final_df = final_df.join(timestamp_map, how="left")
+
+    if "survey_timestamp" in final_df.columns:
+        final_df = (
+            final_df.reset_index()
+            .sort_values(["ID", "survey_timestamp"])
+            .set_index(["ID", "survey_wave"])
+        )
+    else:
+        final_df = final_df.sort_index(level=["ID", "survey_wave"])
 
     prev_label_columns = [
         "PHQ9_Score",
@@ -176,9 +240,15 @@ def build_feature_dataframe(
         if subset.empty:
             continue
         grouped = subset.groupby(["ID", "survey_wave"], group_keys=False)
-        ewm_stats = grouped.apply(
-            lambda g: g[SENSOR_FEATURES].ewm(span=span, adjust=False).mean().iloc[-1]
-        )
+        try:
+            ewm_stats = grouped.apply(
+                lambda g: g[SENSOR_FEATURES].ewm(span=span, adjust=False).mean().iloc[-1],
+                include_groups=False,
+            )
+        except TypeError:
+            ewm_stats = grouped.apply(
+                lambda g: g[SENSOR_FEATURES].ewm(span=span, adjust=False).mean().iloc[-1]
+            )
         ewm_stats.columns = [f"{col}_ewm_span{span}" for col in ewm_stats.columns]
         ewm_frames.append(ewm_stats)
     if ewm_frames:
@@ -243,7 +313,10 @@ def prepare_feature_context(
     dataset: pd.DataFrame,
     split_seed: int = 42,
     exclude_prev_survey: bool = False,
+    top_k_features: int = 120,
+    top_k_min: Optional[int] = None,
 ) -> Dict[str, object]:
+    top_k_features = max(1, int(top_k_features))
     if exclude_prev_survey:
         drop_cols = [
             col
@@ -315,15 +388,11 @@ def prepare_feature_context(
         trend_cols,
     )
 
-    unique_entities = dataset[["target_binary"]].reset_index().drop_duplicates()
-    train_ids, val_ids = train_test_split(
-        unique_entities,
+    train_idx, val_idx = participant_stratified_split(
+        dataset,
         test_size=0.2,
-        stratify=unique_entities["target_binary"],
-        random_state=split_seed,
+        split_seed=split_seed,
     )
-    train_idx = [(row.ID, row.survey_wave) for row in train_ids.itertuples(index=False)]
-    val_idx = [(row.ID, row.survey_wave) for row in val_ids.itertuples(index=False)]
 
     base_importance_strategy = StrategyConfig(
         name="HGB_importance",
@@ -347,9 +416,16 @@ def prepare_feature_context(
         strategy=base_importance_strategy,
         train_index=train_idx,
     )
-    top_feature_names = importances_series.head(120).index.tolist()
-    if len(top_feature_names) < 120:
-        top_feature_names = importances_series.index.tolist()
+    top_feature_pool = importances_series.index.tolist()
+    top_feature_names = top_feature_pool[:top_k_features]
+    if not top_feature_names:
+        top_feature_names = top_feature_pool
+    top_k_default = len(top_feature_names)
+    top_k_max = len(top_feature_pool)
+    if top_k_min is None:
+        top_k_min = min(80, top_k_default) if top_k_default >= 80 else max(1, top_k_default // 2 or 1)
+    top_k_min = max(1, min(top_k_min, top_k_max))
+    top_k_default = max(top_k_min, top_k_default)
 
     return dict(
         columns=list(columns),
@@ -367,11 +443,16 @@ def prepare_feature_context(
         trend_cols=trend_cols,
         all_features=all_features,
         top_feature_names=top_feature_names,
+        top_feature_pool=top_feature_pool,
+        top_k_default=top_k_default,
+        top_k_min=top_k_min,
+        top_k_max=top_k_max,
         train_idx=train_idx,
         val_idx=val_idx,
         base_importance_strategy=base_importance_strategy,
-        unique_entities=unique_entities,
     )
+
+
 def compute_feature_importance(
     dataset: pd.DataFrame,
     features: List[str],
@@ -414,11 +495,16 @@ def evaluate_block_holdout(
         .drop_duplicates()
         .sort_values("survey_timestamp")
     )
-    cutoff = int(len(timestamp_df) * quantile)
-    if cutoff == 0 or cutoff >= len(timestamp_df):
+    participant_last_ts = (
+        timestamp_df.groupby("ID")["survey_timestamp"].max().sort_values()
+    )
+    cutoff = int(len(participant_last_ts) * quantile)
+    if cutoff == 0 or cutoff >= len(participant_last_ts):
         raise ValueError("Invalid block split; adjust quantile or ensure timestamps exist")
-    train_blocks = timestamp_df.iloc[:cutoff][["ID", "survey_wave"]]
-    val_blocks = timestamp_df.iloc[cutoff:][["ID", "survey_wave"]]
+    train_ids = participant_last_ts.index[:cutoff]
+    val_ids = participant_last_ts.index[cutoff:]
+    train_blocks = timestamp_df[timestamp_df["ID"].isin(train_ids)][["ID", "survey_wave"]]
+    val_blocks = timestamp_df[timestamp_df["ID"].isin(val_ids)][["ID", "survey_wave"]]
     train_idx = list(zip(train_blocks["ID"], train_blocks["survey_wave"]))
     val_idx = list(zip(val_blocks["ID"], val_blocks["survey_wave"]))
     metrics, _ = evaluate_strategy(
@@ -606,7 +692,12 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
     ewm_cols = context["ewm_cols"]  # type: ignore[index]
     trend_cols = context["trend_cols"]  # type: ignore[index]
     all_features = context["all_features"]  # type: ignore[index]
-    top_feature_names = context["top_feature_names"]  # type: ignore[index]
+    top_feature_pool = context["top_feature_pool"]  # type: ignore[index]
+    top_k_default = context.get("top_k_default", len(top_feature_pool))  # type: ignore[arg-type]
+    top_feature_names = top_feature_pool[:top_k_default]
+    hgb_topk = top_feature_pool[: min(len(top_feature_pool), 94)]
+    lgbm_topk = top_feature_pool[: min(len(top_feature_pool), 42)]
+    xgb_topk = top_feature_pool[: min(len(top_feature_pool), 44)]
     base_importance_strategy = context["base_importance_strategy"]  # type: ignore[index]
 
     def merge_features(*groups: List[str]) -> List[str]:
@@ -686,7 +777,7 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
         StrategyConfig(
             name="HGB_top120",
             model_type="hgb",
-            features=top_feature_names,
+            features=hgb_topk,
             params=dict(base_importance_strategy.params),
             transform=None,
             use_sample_weights=False,
@@ -694,16 +785,16 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
         StrategyConfig(
             name="HGB_optuna_best",
             model_type="hgb",
-            features=top_feature_names,
+            features=hgb_topk,
             params=dict(
                 loss="log_loss",
-                learning_rate=0.011131986452741485,
-                max_leaf_nodes=199,
-                max_depth=4,
-                max_iter=700,
-                l2_regularization=4.714719625261812e-05,
-                min_samples_leaf=38,
-                max_bins=80,
+                learning_rate=0.011007694002855726,
+                max_leaf_nodes=487,
+                max_depth=3,
+                max_iter=200,
+                l2_regularization=0.010298368318423639,
+                min_samples_leaf=34,
+                max_bins=184,
                 class_weight="balanced",
                 random_state=42,
             ),
@@ -713,25 +804,25 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
         StrategyConfig(
             name="XGB_v5_full",
             model_type="xgb",
-            features=all_features,
+            features=merge_features(xgb_topk),
             params=dict(
                 objective="binary:logistic",
                 eval_metric="auc",
-                learning_rate=0.03,
+                learning_rate=0.0053343091361369305,
                 max_depth=6,
-                subsample=0.9,
-                colsample_bytree=0.8,
-                colsample_bylevel=0.8,
-                min_child_weight=2,
-                n_estimators=1200,
-                reg_lambda=1.0,
-                reg_alpha=0.05,
-                scale_pos_weight=1.4,
+                subsample=0.5543190206315183,
+                colsample_bytree=0.4209596000140664,
+                colsample_bylevel=0.4209596000140664,
+                min_child_weight=8.643553072189608,
+                n_estimators=503,
+                reg_lambda=2.222603538440007,
+                reg_alpha=0.5765904707390151,
+                scale_pos_weight=1.0723021386057379,
                 random_state=42,
                 tree_method="hist",
             ),
             transform=None,
-            use_sample_weights=True,
+            use_sample_weights=False,
         ),
         StrategyConfig(
             name="HGB_v6_ewm_trend",
@@ -762,43 +853,43 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
         StrategyConfig(
             name="LGBM_v7_full",
             model_type="lgbm",
-            features=all_features,
+            features=merge_features(lgbm_topk),
             params=dict(
                 objective="binary",
                 metric="auc",
                 boosting_type="gbdt",
-                learning_rate=0.02,
-                n_estimators=1500,
-                num_leaves=95,
+                learning_rate=0.011024790465649671,
+                n_estimators=404,
+                num_leaves=244,
                 max_depth=-1,
-                subsample=0.85,
-                colsample_bytree=0.75,
-                min_child_samples=24,
-                reg_alpha=0.2,
-                reg_lambda=0.4,
+                subsample=0.6134946108429382,
+                colsample_bytree=0.7176925208164471,
+                min_child_samples=117,
+                reg_alpha=0.04438903330917268,
+                reg_lambda=0.0008534870496295665,
                 random_state=42,
                 n_jobs=-1,
             ),
             transform=None,
-            use_sample_weights=True,
+            use_sample_weights=False,
         ),
         StrategyConfig(
             name="LGBM_v8_top120",
             model_type="lgbm",
-            features=merge_features(top_feature_names, ewm_cols, trend_cols, log_cols),
+            features=merge_features(lgbm_topk, ewm_cols, trend_cols, log_cols),
             params=dict(
                 objective="binary",
                 metric="auc",
                 boosting_type="gbdt",
-                learning_rate=0.035,
-                n_estimators=1100,
-                num_leaves=63,
+                learning_rate=0.011024790465649671,
+                n_estimators=404,
+                num_leaves=244,
                 max_depth=-1,
-                subsample=0.9,
-                colsample_bytree=0.8,
-                min_child_samples=16,
-                reg_alpha=0.1,
-                reg_lambda=0.25,
+                subsample=0.6134946108429382,
+                colsample_bytree=0.7176925208164471,
+                min_child_samples=117,
+                reg_alpha=0.04438903330917268,
+                reg_lambda=0.0008534870496295665,
                 random_state=42,
                 n_jobs=-1,
             ),
@@ -836,14 +927,149 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
     ]
 
 
+def _extract_group_labels(index: pd.Index) -> np.ndarray:
+    if isinstance(index, pd.MultiIndex):
+        return index.get_level_values(0).to_numpy()
+    return index.to_numpy()
+
+
+def _tune_logistic_meta(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    candidate_cs: Optional[List[float]] = None,
+) -> Tuple[StandardScaler, LogisticRegression, float, float]:
+    if candidate_cs is None:
+        candidate_cs = [0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
+    unique_groups = np.unique(groups)
+    n_splits = max(2, min(5, len(unique_groups)))
+    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    best_score = -np.inf
+    best_c = candidate_cs[0]
+    for C in candidate_cs:
+        fold_scores: List[float] = []
+        for train_idx, val_idx in cv.split(X, y, groups):
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X[train_idx])
+            X_val = scaler.transform(X[val_idx])
+            model = LogisticRegression(
+                C=C,
+                class_weight="balanced",
+                max_iter=2000,
+                solver="lbfgs",
+                random_state=42,
+            )
+            model.fit(X_train, y[train_idx])
+            preds = model.predict_proba(X_val)[:, 1]
+            fold_scores.append(roc_auc_score(y[val_idx], preds))
+        mean_score = float(np.mean(fold_scores))
+        if mean_score > best_score:
+            best_score = mean_score
+            best_c = C
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    model = LogisticRegression(
+        C=best_c,
+        class_weight="balanced",
+        max_iter=2000,
+        solver="lbfgs",
+        random_state=42,
+    )
+    model.fit(X_scaled, y)
+    return scaler, model, best_c, best_score
+
+
+def _tune_xgb_meta(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+) -> Tuple[xgb.XGBClassifier, Dict[str, float], float]:
+    param_grid = [
+        dict(learning_rate=lr, max_depth=md, n_estimators=ne, subsample=sub)
+        for lr in (0.02, 0.05, 0.1)
+        for md in (2, 3)
+        for ne in (200, 400)
+        for sub in (0.7, 0.9)
+    ]
+    unique_groups = np.unique(groups)
+    n_splits = max(2, min(5, len(unique_groups)))
+    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    best_score = -np.inf
+    best_params = param_grid[0]
+    for params in param_grid:
+        fold_scores: List[float] = []
+        for train_idx, val_idx in cv.split(X, y, groups):
+            model = xgb.XGBClassifier(
+                objective="binary:logistic",
+                eval_metric="auc",
+                random_state=42,
+                tree_method="hist",
+                n_jobs=1,
+                learning_rate=params["learning_rate"],
+                max_depth=params["max_depth"],
+                n_estimators=params["n_estimators"],
+                subsample=params["subsample"],
+                colsample_bytree=0.8,
+                reg_lambda=1.0,
+                reg_alpha=0.05,
+            )
+            model.fit(X[train_idx], y[train_idx])
+            preds = model.predict_proba(X[val_idx])[:, 1]
+            fold_scores.append(roc_auc_score(y[val_idx], preds))
+        mean_score = float(np.mean(fold_scores))
+        if mean_score > best_score:
+            best_score = mean_score
+            best_params = params
+    final_model = xgb.XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="auc",
+        random_state=42,
+        tree_method="hist",
+        n_jobs=1,
+        learning_rate=best_params["learning_rate"],
+        max_depth=best_params["max_depth"],
+        n_estimators=best_params["n_estimators"],
+        subsample=best_params["subsample"],
+        colsample_bytree=0.8,
+        reg_lambda=1.0,
+        reg_alpha=0.05,
+    )
+    final_model.fit(X, y)
+    return final_model, best_params, best_score
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train tabular models on engineered features.")
     parser.add_argument("--history-hours", type=int, default=240)
     parser.add_argument("--cv-folds", type=int, default=5)
+    parser.add_argument(
+        "--top-k-features",
+        type=int,
+        default=120,
+        help="Number of top ranked features (by HGB importance) to keep for top-k strategies.",
+    )
+    parser.add_argument(
+        "--top-k-min",
+        type=int,
+        default=None,
+        help="Minimum feature count considered when strategies dynamically tune their top-k subset.",
+    )
     args = parser.parse_args()
 
+    overall_start = time.time()
+
+    step_start = time.time()
     dataset = build_feature_dataframe(history_hours=args.history_hours)
-    context = prepare_feature_context(dataset, split_seed=42)
+    print(f"[Timer] Feature dataframe built in {time.time() - step_start:.1f}s")
+
+    step_start = time.time()
+    context = prepare_feature_context(
+        dataset,
+        split_seed=42,
+        top_k_features=args.top_k_features,
+        top_k_min=args.top_k_min,
+    )
+    print(f"[Timer] Feature context prepared in {time.time() - step_start:.1f}s")
 
     feature_base = context["feature_base"]
     agg_mean_std_w24 = context["agg_mean_std_w24"]
@@ -950,17 +1176,17 @@ def main() -> None:
             features=top_feature_names,
             params=dict(
                 loss="log_loss",
-                learning_rate=0.01056088548372447,
-                max_leaf_nodes=159,
-                max_depth=4,
-                max_iter=525,
-                l2_regularization=0.12243187772901787,
-                min_samples_leaf=43,
-                max_bins=132,
+                learning_rate=0.015320758630314239,
+                max_leaf_nodes=407,
+                max_depth=3,
+                max_iter=150,
+                l2_regularization=0.4348147480451949,
+                min_samples_leaf=80,
+                max_bins=64,
                 class_weight="balanced",
                 random_state=42,
             ),
-            transform="quantile",
+            transform=None,
             use_sample_weights=False,
         ),
         StrategyConfig(
@@ -1091,7 +1317,10 @@ def main() -> None:
     os.makedirs("logs", exist_ok=True)
     results_summary = []
     stacking_payloads: Dict[str, Dict[str, pd.Series]] = {}
-    for strategy in strategies:
+    total_strategies = len(strategies)
+    cumulative_time = 0.0
+    for idx, strategy in enumerate(strategies, 1):
+        strategy_start = time.time()
         metrics, prediction_payload = evaluate_strategy(
             dataset=dataset,
             features=strategy.features,
@@ -1100,6 +1329,13 @@ def main() -> None:
             val_index=val_idx,
             cv_splits=args.cv_folds,
             return_predictions=True,
+        )
+        elapsed = time.time() - strategy_start
+        cumulative_time += elapsed
+        avg_time = cumulative_time / idx
+        remaining = avg_time * (total_strategies - idx)
+        print(
+            f"[Timer] {strategy.name} evaluated in {format_seconds(elapsed)} (ETA ~{format_seconds(max(0.0, remaining))})"
         )
         if prediction_payload is not None:
             stacking_payloads[strategy.name] = prediction_payload
@@ -1165,49 +1401,36 @@ def main() -> None:
 
             y_train_meta = stacking_payloads[selected_names[0]]["y_train"]
             y_holdout_meta = stacking_payloads[selected_names[0]]["y_holdout"]
+            groups_meta = _extract_group_labels(meta_train_df.index)
+            X_train_meta = meta_train_df.values.astype(np.float32)
+            X_holdout_meta = meta_holdout_df.values.astype(np.float32)
 
-            scaler = StandardScaler()
-            X_train_meta = scaler.fit_transform(meta_train_df.values)
-            X_holdout_meta = scaler.transform(meta_holdout_df.values)
-
-            meta_clf = LogisticRegression(
-                max_iter=2000,
-                class_weight="balanced",
-                C=10.0,
-                random_state=42,
+            scaler, meta_clf, best_c, lr_cv = _tune_logistic_meta(
+                X_train_meta, y_train_meta.values, groups_meta
             )
-            meta_clf.fit(X_train_meta, y_train_meta.values)
-            holdout_meta_pred = meta_clf.predict_proba(X_holdout_meta)[:, 1]
+            holdout_meta_pred = meta_clf.predict_proba(scaler.transform(X_holdout_meta))[:, 1]
             stack_auc = roc_auc_score(y_holdout_meta.values, holdout_meta_pred)
 
             blend_pred = meta_holdout_df[base_prediction_cols].mean(axis=1)
             blend_auc = roc_auc_score(y_holdout_meta.values, blend_pred.values)
 
-            meta_xgb = xgb.XGBClassifier(
-                objective="binary:logistic",
-                eval_metric="auc",
-                learning_rate=0.05,
-                max_depth=3,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                n_estimators=600,
-                reg_lambda=1.0,
-                reg_alpha=0.05,
-                random_state=42,
-                tree_method="hist",
+            meta_xgb_model, meta_xgb_params, xgb_cv = _tune_xgb_meta(
+                X_train_meta, y_train_meta.values, groups_meta
             )
-            meta_xgb.fit(X_train_meta, y_train_meta.values)
-            xgb_meta_pred = meta_xgb.predict_proba(X_holdout_meta)[:, 1]
+            xgb_meta_pred = meta_xgb_model.predict_proba(X_holdout_meta)[:, 1]
             xgb_meta_auc = roc_auc_score(y_holdout_meta.values, xgb_meta_pred)
 
             print(
                 f"Blend (top-{len(selected_names)} mean): holdout ROC-AUC {blend_auc:.4f}"
             )
             print(
-                f"Stacking (top-{len(selected_names)} LR): holdout ROC-AUC {stack_auc:.4f}"
+                f"Stacking (top-{len(selected_names)} LR, C={best_c:.3f}): holdout ROC-AUC {stack_auc:.4f}"
             )
             print(
-                f"Stacking (top-{len(selected_names)} XGB): holdout ROC-AUC {xgb_meta_auc:.4f}"
+                "Stacking "
+                f"(top-{len(selected_names)} XGB, lr={meta_xgb_params['learning_rate']}, "
+                f"depth={meta_xgb_params['max_depth']}, estimators={meta_xgb_params['n_estimators']}): "
+                f"holdout ROC-AUC {xgb_meta_auc:.4f}"
             )
 
             stacking_results = {
@@ -1222,6 +1445,8 @@ def main() -> None:
                     xgb_meta_pred, index=meta_holdout_df.index, name="StackingXGB"
                 ),
                 "y_holdout": y_holdout_meta,
+                "logreg_params": {"C": best_c, "cv_mean": lr_cv},
+                "xgb_params": {**meta_xgb_params, "cv_mean": xgb_cv},
             }
 
     best = max(results_summary, key=lambda item: item[1]["holdout_auc"])
@@ -1254,15 +1479,21 @@ def main() -> None:
             f"Blend (models={selected_names}): holdout={stacking_results['blend_auc']:.4f}"
         )
         log_lines.append(
-            f"Stacking LR (models={selected_names}): holdout={stacking_results['stack_auc']:.4f}"
+            f"Stacking LR (models={selected_names}, C={stacking_results['logreg_params']['C']:.3f}): "
+            f"holdout={stacking_results['stack_auc']:.4f}"
         )
         if "stack_xgb_auc" in stacking_results:
             log_lines.append(
-                f"Stacking XGB (models={selected_names}): holdout={stacking_results['stack_xgb_auc']:.4f}"
+                "Stacking XGB "
+                f"(models={selected_names}, depth={stacking_results['xgb_params']['max_depth']}, "
+                f"n_estimators={stacking_results['xgb_params']['n_estimators']}): "
+                f"holdout={stacking_results['stack_xgb_auc']:.4f}"
             )
 
     with open("logs/tabular_results.txt", "w") as f:
         f.write("\n".join(log_lines))
+
+    print(f"[Timer] Total runtime {format_seconds(time.time() - overall_start)}")
 
 
 if __name__ == "__main__":

@@ -250,15 +250,6 @@ def build_model_dataframe(
     sensor_frames: Dict[str, pd.DataFrame],
     cfg: Config,
 ) -> pd.DataFrame:
-    if cfg.use_class_weights:
-        total = len(label_df)
-        pos = (label_df["PHQ9_Score"] >= 10).sum()
-        neg = total - pos
-        weight_pos = total / (2 * pos) if pos > 0 else 1.0
-        weight_neg = total / (2 * neg) if neg > 0 else 1.0
-    else:
-        weight_pos = weight_neg = 1.0
-
     records: List[pd.DataFrame] = []
     for _, row in label_df.iterrows():
         seq = build_sample_sequence(
@@ -298,12 +289,6 @@ def build_model_dataframe(
                 value = "Unknown"
             seq[col] = value
 
-        if cfg.use_class_weights:
-            weight = weight_pos if row["PHQ9_Score"] >= 10 else weight_neg
-        else:
-            weight = 1.0
-        seq["sample_weight"] = np.float32(weight)
-
         if coverage_ratio(seq[TIME_VARYING_REALS]) < cfg.min_coverage_ratio:
             continue
 
@@ -314,8 +299,8 @@ def build_model_dataframe(
 
     model_df = pd.concat(records, ignore_index=True)
     for column in STATIC_REALS:
-        model_df[column] = model_df[column].astype(np.float32)
-        model_df[column] = model_df[column].fillna(model_df[column].median())
+        if column in model_df.columns:
+            model_df[column] = model_df[column].astype(np.float32)
 
     for column in STATIC_CATEGORICALS:
         model_df[column] = model_df[column].fillna("Unknown").astype("category")
@@ -323,23 +308,75 @@ def build_model_dataframe(
     return model_df
 
 
+def participant_stratified_split(
+    entity_targets: pd.DataFrame,
+    val_fraction: float,
+    random_state: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    participant_labels = (
+        entity_targets[["ID", "target_binary"]]
+        .groupby("ID")["target_binary"]
+        .max()
+    )
+    stratify_labels: Optional[np.ndarray]
+    if participant_labels.nunique() > 1:
+        stratify_labels = participant_labels.values
+    else:
+        stratify_labels = None
+    participant_ids = participant_labels.index.to_numpy()
+    train_ids, val_ids = train_test_split(
+        participant_ids,
+        test_size=val_fraction,
+        random_state=random_state,
+        stratify=stratify_labels,
+    )
+    train_entities = entity_targets[entity_targets["ID"].isin(train_ids)][["ID", "survey_wave"]]
+    val_entities = entity_targets[entity_targets["ID"].isin(val_ids)][["ID", "survey_wave"]]
+    return train_entities, val_entities
+
+
 def make_datasets(
     model_df: pd.DataFrame,
     cfg: Config,
     val_fraction: float = 0.2,
 ) -> Tuple[TimeSeriesDataSet, TimeSeriesDataSet]:
-    unique_entities = model_df[["ID", "survey_wave"]].drop_duplicates()
-
-    train_entities, val_entities = train_test_split(
-        unique_entities, test_size=val_fraction, random_state=cfg.random_seed
+    entity_targets = (
+        model_df[model_df["time_idx"] == 0][["ID", "survey_wave", "target_binary"]]
+        .drop_duplicates()
+    )
+    train_entities, val_entities = participant_stratified_split(
+        entity_targets, val_fraction=val_fraction, random_state=cfg.random_seed
     )
 
     def subset(df: pd.DataFrame, entities: pd.DataFrame) -> pd.DataFrame:
         merged = df.merge(entities, on=["ID", "survey_wave"], how="inner")
         return merged
 
-    train_df = subset(model_df, train_entities)
-    val_df = subset(model_df, val_entities)
+    train_df = subset(model_df, train_entities).copy()
+    val_df = subset(model_df, val_entities).copy()
+
+    if cfg.use_class_weights:
+        train_targets = (
+            train_df[train_df["time_idx"] == 0][["ID", "survey_wave", "target_binary"]]
+            .drop_duplicates()
+        )
+        pos = (train_targets["target_binary"] >= 1).sum()
+        neg = len(train_targets) - pos
+        weight_pos = len(train_targets) / (2 * pos) if pos > 0 else 1.0
+        weight_neg = len(train_targets) / (2 * neg) if neg > 0 else 1.0
+        train_targets["sample_weight"] = np.where(
+            train_targets["target_binary"] >= 1,
+            weight_pos,
+            weight_neg,
+        ).astype(np.float32)
+        weight_map = train_targets.set_index(["ID", "survey_wave"])["sample_weight"]
+        train_df = train_df.join(weight_map, on=["ID", "survey_wave"])
+        val_df["sample_weight"] = 1.0
+    else:
+        if "sample_weight" in train_df.columns:
+            train_df = train_df.drop(columns=["sample_weight"])
+        if "sample_weight" in val_df.columns:
+            val_df = val_df.drop(columns=["sample_weight"])
 
     if cfg.task == "classification":
         target_col = "target_binary"

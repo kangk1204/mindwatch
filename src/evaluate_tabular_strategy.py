@@ -1,16 +1,21 @@
 import argparse
 import json
 import os
+import time
 from datetime import datetime
 from typing import Dict, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.calibration import calibration_curve
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
+    confusion_matrix,
     f1_score,
     fbeta_score,
     matthews_corrcoef,
+    precision_recall_curve,
     precision_recall_fscore_support,
     roc_auc_score,
     roc_curve,
@@ -75,17 +80,29 @@ def main() -> None:
     parser.add_argument("--strategy", type=str, default="HGB_optuna_best")
     parser.add_argument("--exclude-prev-survey", action="store_true", help="Drop all prev_* and cross-wave survey features for ablation.")
     parser.add_argument("--output-prefix", type=str, default=None)
+    parser.add_argument("--top-k-features", type=int, default=120, help="Number of top-importance features for top-k strategies.")
+    parser.add_argument("--top-k-min", type=int, default=None, help="Minimum feature count when strategies tune top-k subsets.")
     args = parser.parse_args()
 
+    overall_start = time.time()
+
+    step_start = time.time()
     dataset = build_feature_dataframe(history_hours=args.history_hours)
+    print(f"[Timer] Feature dataframe built in {time.time() - step_start:.1f}s")
+
+    step_start = time.time()
     context = prepare_feature_context(
         dataset,
         split_seed=args.split_seed,
         exclude_prev_survey=args.exclude_prev_survey,
+        top_k_features=args.top_k_features,
+        top_k_min=args.top_k_min,
     )
+    print(f"[Timer] Feature context prepared in {time.time() - step_start:.1f}s")
     strategies = build_default_strategies(context)
     strategy = find_strategy(args.strategy, tuple(strategies))
 
+    step_start = time.time()
     metrics, preds = evaluate_strategy(
         dataset=dataset,
         features=strategy.features,
@@ -95,17 +112,25 @@ def main() -> None:
         cv_splits=args.cv_folds,
         return_predictions=True,
     )
+    print(f"[Timer] Strategy evaluation completed in {time.time() - step_start:.1f}s")
     if preds is None:
         raise RuntimeError("Predictions were not returned; cannot compute curve-based metrics.")
 
     y_true = preds["y_holdout"].values  # type: ignore[index]
     y_scores = preds["holdout"].values  # type: ignore[index]
-    fpr, tpr, roc_thresholds = roc_curve(y_true, y_scores)
-    roc_auc = roc_auc_score(y_true, y_scores)
-
     best_f1 = select_best_threshold(y_true, y_scores, mode="f1")
     best_f2 = select_best_threshold(y_true, y_scores, mode="f2")
     default_metrics = compute_threshold_metrics(y_true, y_scores, threshold=0.5)
+
+    fpr, tpr, roc_thresholds = roc_curve(y_true, y_scores)
+    precision, recall, pr_thresholds = precision_recall_curve(y_true, y_scores)
+    roc_auc = roc_auc_score(y_true, y_scores)
+    pr_auc = average_precision_score(y_true, y_scores)
+
+    frac_pos, mean_pred = calibration_curve(y_true, y_scores, n_bins=10, strategy="uniform")
+    cm_default = confusion_matrix(y_true, (y_scores >= 0.5).astype(int))
+    cm_best_f1 = confusion_matrix(y_true, (y_scores >= best_f1["threshold"]).astype(int))
+    cm_best_f2 = confusion_matrix(y_true, (y_scores >= best_f2["threshold"]).astype(int))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     scenario = "no_prev" if args.exclude_prev_survey else "with_prev"
@@ -113,6 +138,8 @@ def main() -> None:
 
     os.makedirs("plots", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
+
+    step_start = time.time()
 
     plt.figure(figsize=(6, 5))
     plt.plot(fpr, tpr, label=f"{strategy.name} (AUC={roc_auc:.3f})", color="#1f77b4", linewidth=2)
@@ -126,10 +153,38 @@ def main() -> None:
     plt.savefig(roc_path, dpi=300)
     plt.close()
 
+    plt.figure(figsize=(6, 5))
+    plt.plot(recall, precision, color="#d62728", linewidth=2)
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title(f"Precision-Recall Curve - {strategy.name}")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    pr_path = os.path.join("plots", f"pr_{prefix}.png")
+    plt.tight_layout()
+    plt.savefig(pr_path, dpi=300)
+    plt.close()
+
+    plt.figure(figsize=(6, 5))
+    plt.plot(mean_pred, frac_pos, marker="o", color="#2ca02c")
+    plt.plot([0, 1], [0, 1], linestyle="--", color="gray")
+    plt.xlabel("Mean Predicted Probability")
+    plt.ylabel("Fraction of Positives")
+    plt.title(f"Calibration Curve - {strategy.name}")
+    plt.grid(True, linestyle="--", alpha=0.4)
+    calib_path = os.path.join("plots", f"calibration_{prefix}.png")
+    plt.tight_layout()
+    plt.savefig(calib_path, dpi=300)
+    plt.close()
+
     roc_data = {
         "fpr": fpr.tolist(),
         "tpr": tpr.tolist(),
         "thresholds": roc_thresholds.tolist(),
+    }
+    pr_data = {
+        "precision": precision.tolist(),
+        "recall": recall.tolist(),
+        "thresholds": pr_thresholds.tolist(),
     }
     results = {
         "strategy": strategy.name,
@@ -138,11 +193,24 @@ def main() -> None:
         "split_seed": args.split_seed,
         "holdout_metrics": metrics,
         "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
         "roc_curve": roc_data,
+        "pr_curve": pr_data,
+        "calibration": {
+            "mean_predicted": mean_pred.tolist(),
+            "fraction_of_positives": frac_pos.tolist(),
+        },
+        "confusion_matrices": {
+            "default": cm_default.tolist(),
+            "best_f1": cm_best_f1.tolist(),
+            "best_f2": cm_best_f2.tolist(),
+        },
         "best_f1": best_f1,
         "best_f2": best_f2,
         "threshold_0_5": default_metrics,
         "roc_plot": roc_path,
+        "pr_plot": pr_path,
+        "calibration_plot": calib_path,
         "scenario": scenario,
     }
 
@@ -151,6 +219,11 @@ def main() -> None:
         json.dump(results, fp, indent=2)
     print(f"Saved evaluation summary to {output_path}")
     print(f"ROC curve image: {roc_path}")
+    print(f"PR curve image: {pr_path}")
+    print(f"Calibration curve image: {calib_path}")
+    print(
+        f"[Timer] Total evaluation runtime {time.time() - overall_start:.1f}s"
+    )
 
 
 if __name__ == "__main__":

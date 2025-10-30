@@ -219,6 +219,8 @@ def main() -> None:
     parser.add_argument("--cv-folds", type=int, default=5)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--exclude-prev-survey", action="store_true")
+    parser.add_argument("--top-k-features", type=int, default=120, help="Number of top-importance features to retain for feature-based models.")
+    parser.add_argument("--top-k-min", type=int, default=None, help="Minimum feature count when top-k selection is tuned.")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -240,6 +242,8 @@ def main() -> None:
         dataset,
         split_seed=args.split_seed,
         exclude_prev_survey=args.exclude_prev_survey,
+        top_k_features=args.top_k_features,
+        top_k_min=args.top_k_min,
     )
     strategies = build_default_strategies(context)
     best_strategy = next(s for s in strategies if s.name == "HGB_optuna_best")
