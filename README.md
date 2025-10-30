@@ -1,159 +1,182 @@
 # Mindwatch (Tabular AI for Mental Health)
 
-Mindwatch is an end-to-end tabular modeling pipeline that predicts depressive symptoms from multi-modal wearable/EMA data. It includes feature engineering, baseline model sweeps, hyperparameter tuning with Optuna, and rich evaluation artifacts (ROC curves, MCC/F1/F2 tables) suitable for publications.
+Mindwatch converts multi-modal wearables and EMA surveys into publication-ready predictive models for depressive symptoms. The pipeline is built around leakage-safe feature engineering, automated hyperparameter tuning, and rich evaluation outputs (plots, tables, JSON summaries) that you can drop directly into papers.
 
-## Highlights
+## What's inside
 
-- **Leakage-safe feature builder**: Adds rolling stats, ratios, deltas, exponential moving averages, cross-wave survey deltas, etc. in a single place (`run_tabular_models.py`).
-- **Strategy factory**: A reusable set of configurations (HGB, LightGBM, XGBoost, CatBoost) plus the latest Optuna-tuned `HGB_optuna_best`.
-- **Optuna CLI (`tune_tabular_models.py`)**: Supports CPU/GPU, persistent studies, and optional block validation.
-- **Evaluation suite (`evaluate_tabular_strategy.py`)**: Generates ROC plots, F1/F2/MCC threshold tables, and JSON summaries for paper-ready figures.
+- **Leakage-safe feature builder** (`src/run_tabular_models.py`)  
+  Rolling statistics, cross-wave deltas, ratios, EWM trends, etc. are created in one controlled place with participant-level splits to prevent data leakage.
+- **Automation-ready pipeline** (`src/run_full_pipeline.py`)  
+  Run tuning → evaluation → reporting with a single command; generates ROC/PR/calibration plots and publication tables automatically.
+- **Optuna tuning CLI** (`src/tune_tabular_models.py`)  
+  Supports CPU/GPU tuning, persistent SQLite studies, time-block validation, and sampled feature budgets.
+- **Rich evaluation suite** (`src/evaluate_tabular_strategy.py`)  
+  Outputs ROC/PR/calibration plots, confusion matrices, best-F1/F2 thresholds, and all metrics in JSON for reproducibility.
+- **Tabular deep learning baselines** (`src/train_tabular_dl.py`)  
+  MLP/TabNet training on the engineered feature set for comparison against tree-based methods.
+- **Publication helpers** (`src/build_publication_tables.py`)  
+  Converts pipeline results into ready-to-use CSV/Markdown tables.
 
-## Repository Layout
+## Repository layout
 
 ```
-00_input_data/          # hourly sensor data (not tracked; user-provided)
-00_label_data/          # survey/label sheets (not tracked)
-logs/                   # Optuna + evaluation outputs (created automatically)
-plots/                  # ROC curve images (created automatically)
+00_input_data/          # hourly sensor data (user supplied, not tracked)
+00_label_data/          # survey sheets (user supplied, not tracked)
+logs/                   # Optuna studies, evaluation JSON, summary tables
+plots/                  # ROC / PR / calibration charts
+result_*/               # user-defined pipeline outputs (optional)
 src/
- ├─ run_tabular_models.py       # feature building + strategy runner
- ├─ tune_tabular_models.py      # Optuna tuning CLI
- ├─ evaluate_tabular_strategy.py# ROC/MCC/F1/F2 evaluation CLI
- └─ train_tft.py                # shared data-loading utilities
+ ├─ run_full_pipeline.py         # one-click tuning + evaluation + reporting
+ ├─ run_tabular_models.py        # feature builder + baseline sweep + stacking
+ ├─ tune_tabular_models.py       # Optuna CLI for individual strategies
+ ├─ evaluate_tabular_strategy.py # detailed evaluation + plots
+ ├─ run_optuna_batch.py          # helper to run multiple tuning jobs sequentially
+ ├─ build_publication_tables.py  # turns pipeline results into CSV/Markdown tables
+ ├─ train_tft.py                 # shared data-loading utilities for TFT
+ └─ train_tabular_dl.py          # MLP / TabNet baselines
 ```
 
-## Requirements
+## Prerequisites
 
 - Python 3.10+ (tested on 3.12)
-- OS: Ubuntu 22.04 LTS / macOS 13+ (Apple Silicon supported)
-- Packages: `pandas`, `numpy`, `scikit-learn`, `optuna`, `lightgbm`, `xgboost`, `catboost`, `matplotlib`, `torch`, etc.  
-  *(See `requirements.txt` if provided, otherwise install manually as below.)*
-- GPU tuning (optional): CUDA-compatible device for Linux; Apple Silicon uses CPU (Metal-accelerated CatBoost is experimental).
+- Ubuntu 22.04 LTS or macOS 13+ (Apple Silicon works; GPU tuning not supported there)
+- Optional CUDA GPU for XGBoost/LightGBM tuning
 
-> **Note**: raw data files are not included. Place your sensor CSVs under `00_input_data/` and survey sheets in `00_label_data/`, following the naming expected by `train_tft.py`.
-
-## Installation (Ubuntu & macOS)
+### Installation
 
 ```bash
-# Clone your private repo
+# Clone and enter the repo
 git clone git@github.com:<YOUR_USERNAME>/mindwatch.git
 cd mindwatch
 
-# (Ubuntu) system deps
+# (Ubuntu) system dependencies
 sudo apt-get update && sudo apt-get install -y build-essential python3-venv
 
-# (macOS) ensure Homebrew + Command Line Tools are installed if not already
-xcode-select --install  # once
+# (macOS) ensure Command Line Tools are installed
+xcode-select --install
 
-# Create virtualenv (works on both Ubuntu and Mac)
+# Create and activate virtualenv
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Upgrade pip & install runtime deps
+# Install Python dependencies
 pip install --upgrade pip
 pip install pandas numpy scikit-learn optuna lightgbm xgboost catboost matplotlib torch pytorch-forcasting
+# or: pip install -r requirements.txt
 ```
 
-If you have a `requirements.txt`, simply run `pip install -r requirements.txt`.
+> **Data**: Place hourly sensor CSVs in `00_input_data/` and survey/label spreadsheets in `00_label_data/`, following the filenames expected by `src/train_tft.py`. These folders are ignored by Git.
 
-## Quickstart
+## Quickstart: end-to-end pipeline
 
-### Ubuntu
+The easiest way to train, tune, and collect paper-ready outputs is:
+
 ```bash
 source .venv/bin/activate
-# Baseline sweep of built-in strategies
-python src/run_tabular_models.py --history-hours 240 --cv-folds 5
 
-# Optuna tuning (CPU)
-python src/tune_tabular_models.py \
-  --strategy hgb_top120 \
+python src/run_full_pipeline.py \
+  --run-tuning \
   --history-hours 240 \
   --cv-folds 5 \
-  --trials 50 \
-  --block-validation
-
-# Rich evaluation for best strategy
-python src/evaluate_tabular_strategy.py \
-  --strategy HGB_optuna_best \
-  --history-hours 240 \
-  --cv-folds 5
-```
-
-### macOS (Apple Silicon / Intel)
-macOS steps are identical. When creating the virtualenv, ensure you use the system Python 3.10+ or install via `pyenv`/Homebrew.  
-GPU acceleration is limited on Apple Silicon; run with `--use-gpu` **off**.
-
-## Commands in Detail
-
-### Baseline sweep
-Runs all predefined strategies, logs to `logs/tabular_results.txt`, and performs block validation on the best holdout.
-```bash
-python src/run_tabular_models.py --history-hours 240 --cv-folds 5
-```
-
-### Optuna tuning
-Tune a specific model family. Example (HGB, GPU-enabled on Linux, resume-capable via SQLite):
-```bash
-python src/tune_tabular_models.py \
-  --strategy hgb_top120 \
-  --history-hours 240 \
-  --cv-folds 5 \
-  --trials 200 \
-  --split-seed 42 \
-  --block-validation \
+  --top-k-features 120 \
+  --top-k-min 40 \
+  --tuning-trials 100 \
   --use-gpu \
-  --study-name tabular_hgb \
-  --storage sqlite:///logs/optuna_hgb.db
+  --block-validation \
+  --study-name full_pipeline \
+  --output-dir results/YYYYMMDD_run1
 ```
-Outputs are written to `logs/optuna_<strategy>_<timestamp>.json` plus the SQLite study.
 
-### Rich evaluation (ROC/F1/MCC)
-```bash
-python src/evaluate_tabular_strategy.py \
-  --strategy HGB_optuna_best \
-  --history-hours 240 \
-  --cv-folds 5 \
-  --split-seed 42
+This command:
+1. Runs Optuna tuning for HGB/LightGBM/XGB (reusing existing studies if present).
+2. Evaluates tuned strategies + stacking meta-ensemble.
+3. Saves:
+   - `results/.../full_pipeline_results_<timestamp>.txt`: holdout/CV metrics + stacking results
+   - `results/.../publication_table_metrics.(csv|md)`: ready-to-use performance tables
+   - ROC/PR/calibration plots in `plots/`
+   - Optuna JSON summaries + SQLite DB in `results/.../`
+
+### Need only evaluation tables later?
 ```
-Produces:
-- `logs/evaluation_<strategy>_<timestamp>.json`
-- `plots/roc_<strategy>_<timestamp>.png`
+python src/build_publication_tables.py --log-path results/<run>/full_pipeline_results_*.txt
+```
 
-The JSON includes ROC-AUC, ROC curve samples, best-F1/F2 thresholds, MCC, accuracy, specificity, etc.
+## Manual workflow (advanced)
 
-## GPU Notes
-- **XGBoost**: `--use-gpu` sets `tree_method="gpu_hist"` and `predictor="gpu_predictor"`.
-- **LightGBM**: uses `device="gpu"` when available (ensure LightGBM built with GPU support).
-- **CatBoost**: currently runs on CPU; add `task_type="GPU"` manually if needed.
-- **HistGradientBoosting** (HGB) is CPU-only.
+1. **Baseline sweep**  
+   ```bash
+   python src/run_tabular_models.py --history-hours 240 --cv-folds 5
+   ```
+   Produces `logs/tabular_results.txt`, stacking metrics, and holdout summaries.
+
+2. **Strategy tuning** (single family)  
+   ```bash
+   python src/tune_tabular_models.py \
+     --strategy hgb_top120 \
+     --history-hours 240 \
+     --cv-folds 5 \
+     --trials 200 \
+     --top-k-features 120 \
+     --top-k-min 40 \
+     --block-validation \
+     --use-gpu \
+     --study-name hgb_tuning \
+     --storage sqlite:///logs/optuna_hgb.db
+   ```
+   Generates `logs/optuna_hgb_top120_<timestamp>.json` + SQLite study.
+
+3. **Detailed evaluation + plots**  
+   ```bash
+   python src/evaluate_tabular_strategy.py \
+     --strategy XGB_v5_full \
+     --history-hours 240 \
+     --cv-folds 5 \
+     --top-k-features 120 \
+     --top-k-min 40 \
+     --output-prefix XGB_best
+   ```
+   Outputs:
+   - `plots/roc_XGB_best.png`
+   - `plots/pr_XGB_best.png`
+   - `plots/calibration_XGB_best.png`
+   - `logs/evaluation_XGB_best.json` (ROC/PR data, calibration curve, confusion matrices, best-F1/F2 thresholds, default threshold metrics)
+
+4. **Tabular deep learning baselines**  
+   ```bash
+   python src/train_tabular_dl.py \
+     --model-type mlp \
+     --history-hours 240 \
+     --cv-folds 5 \
+     --top-k-features 120 \
+     --top-k-min 40 \
+     --epochs 50 \
+     --batch-size 256
+   ```
+   Results land in `logs/tabular_<model>_<scenario>_<timestamp>.json`.
+
+## GPU notes
+
+- **XGBoost**: `--use-gpu` switches to `tree_method="gpu_hist"`. If CUDA is not available it automatically falls back to CPU `hist`.
+- **LightGBM**: Requires a GPU-enabled build; otherwise the warning is suppressed and CPU training continues.
+- **CatBoost**: CPU by default; manually add `task_type=GPU` if your environment supports it.
+- **HistGradientBoosting**: CPU-only.
 
 ## Troubleshooting
 
-| Issue | Fix |
-| ----- | --- |
-| `PerformanceWarning: DataFrame is highly fragmented` | Harmless; pandas warns when many columns are appended. Can be ignored or refactored later. |
-| `ModuleNotFoundError` | Ensure virtualenv is active and dependencies installed. |
-| Optuna command runs slow | Consider reducing `--trials`, or use `--n-jobs` for parallel CPU trials. |
-| Need to resume interrupted tuning | Use the same `--study-name` + `--storage sqlite:///...` combination; Optuna resumes automatically. |
+| Issue | Resolution |
+| ----- | ---------- |
+| `PerformanceWarning: DataFrame is highly fragmented` | Safe to ignore; emitted by pandas during feature construction. |
+| Optuna tuning takes too long | Lower `--tuning-trials` or use `--n-jobs` for parallel CPU tuning. |
+| Missing Optuna summaries in custom folders | The pipeline copies the latest `optuna_*.json` from `logs/` automatically; you can also provide `--optuna-dir`. |
+| GPU warnings about fallback to CPU | Informational only; the run will continue using CPU methods. |
 
 ## Contributing
 
-1. Create a new branch.
-2. Make changes and update tests/plots if relevant.
-3. Submit PR; include latest ROC/evaluation artifacts for reproducibility.
+1. Create a branch.
+2. Make changes and run the pipeline or targeted scripts to regenerate artifacts.
+3. Add updated plots/tables (`plots/`, `logs/`) relevant to your change.
+4. Submit a PR with a brief summary of the results (holdout metrics, tuning settings).
 
 ---
 
-Questions or issues? Open a private GitHub issue in the `mindwatch` repo or contact the maintainers. Happy modeling! 🎯
-### Tabular deep learning (MLP / TabNet)
-Requires PyTorch (already used by TFT) and optionally `pytorch-tabnet` (`pip install pytorch-tabnet`).
-```bash
-python src/train_tabular_dl.py \
-  --model-type mlp \
-  --history-hours 240 \
-  --epochs 50 \
-  --batch-size 256 \
-  --exclude-prev-survey  # optional ablation
-```
-Use `--model-type tabnet` to switch architectures; `--use-gpu` is not needed because Torch auto-detects CUDA. Results are saved to `logs/tabular_<model>_<scenario>_<timestamp>.json`.
+Questions or feedback? Open a private GitHub issue or reach the maintainers directly. Happy modeling! 🎯
