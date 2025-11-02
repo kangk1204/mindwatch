@@ -17,10 +17,13 @@ import pandas as pd
 CACHE_DIR = Path("logs")
 CACHE_PATH = CACHE_DIR / "text_features.csv"
 META_PATH = CACHE_DIR / "text_features_meta.json"
-FEATURE_VERSION = 2  # bump when feature selection rules change
+FEATURE_VERSION = 3  # bump when feature selection rules change
 
 LABEL_BLOCKLIST = (
     "phq9",
+    "gad7",
+    "dsm",
+    "loneliness",
     "target_binary",
     "target_score",
 )
@@ -38,6 +41,18 @@ def _label_latest_mtime(label_dir: Path = Path("00_label_data")) -> float:
     return latest
 
 
+def _drop_blocklisted_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove any cached columns that still violate the blocklist."""
+    drop_cols = [
+        col
+        for col in df.columns
+        if any(keyword in col.lower() for keyword in LABEL_BLOCKLIST)
+    ]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+    return df
+
+
 def _load_cached_features(label_mtime: float) -> pd.DataFrame | None:
     """Return cached feature table if source data and schema version match."""
     if not CACHE_PATH.exists() or not META_PATH.exists():
@@ -50,9 +65,10 @@ def _load_cached_features(label_mtime: float) -> pd.DataFrame | None:
     if meta.get("label_mtime") != label_mtime or meta.get("feature_version") != FEATURE_VERSION:
         return None
     try:
-        return pd.read_csv(CACHE_PATH)
+        df = pd.read_csv(CACHE_PATH)
     except Exception:
         return None
+    return _drop_blocklisted_columns(df)
 
 
 def _store_cached_features(df: pd.DataFrame, label_mtime: float) -> None:
@@ -144,6 +160,7 @@ def build_text_feature_table(label_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     features = pd.concat(feature_frames, axis=1).fillna(0.0)
+    features = _drop_blocklisted_columns(features)
     features = features.astype(np.float32)
     features = features.reset_index()
     merged = base.merge(features, on=["ID", "survey_wave"], how="left").fillna(0.0)

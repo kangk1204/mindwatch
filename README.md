@@ -5,7 +5,7 @@ Mindwatch converts multi-modal wearables, voice clips, and survey responses into
 ## What's inside
 
 - **Leakage-safe feature builder** (`src/run_tabular_models.py`)  
-  Rolling statistics, cross-wave deltas, ratios, EWM trends, text encodings, and voice descriptors are created in one controlled place with participant-level splits to prevent data leakage.
+  Rolling statistics, cross-wave deltas, ratios, EWM trends, text encodings, and voice descriptors are created in one controlled place with participant-level splits to prevent data leakage. Text features automatically drop PHQ/GAD/DSM/Loneliness responses to avoid questionnaire leakage.
 - **Automation-ready pipeline** (`src/run_full_pipeline.py`)  
   Run tuning → evaluation → reporting with a single command; generates ROC/PR/calibration plots and publication tables automatically.
 - **Optuna tuning CLI** (`src/tune_tabular_models.py`)  
@@ -14,6 +14,8 @@ Mindwatch converts multi-modal wearables, voice clips, and survey responses into
   Outputs ROC/PR/calibration plots, confusion matrices, best-F1/F2 thresholds, and all metrics in JSON for reproducibility.
 - **Tabular deep learning baselines** (`src/train_tabular_dl.py`)  
   MLP/TabNet training on the engineered feature set for comparison against tree-based methods.
+- **Explainability toolkit** (`src/generate_feature_explanations.py`)  
+  Rebuilds the tuned XGB model, computes permutation SHAP values on a leakage-safe holdout, and exports ranked TSV + SVG plots with Hangul-safe fonts.
 - **Publication helpers** (`src/build_publication_tables.py`)  
   Converts pipeline results into ready-to-use CSV/Markdown tables.
 
@@ -34,7 +36,8 @@ src/
  ├─ run_optuna_batch.py          # helper to run multiple tuning jobs sequentially
  ├─ build_publication_tables.py  # turns pipeline results into CSV/Markdown tables
  ├─ train_tft.py                 # shared data-loading utilities for TFT
- └─ train_tabular_dl.py          # MLP / TabNet baselines
+ ├─ train_tabular_dl.py          # MLP / TabNet baselines
+ └─ generate_feature_explanations.py # SHAP-style feature importance TSV + SVGs
 ```
 
 ## Prerequisites
@@ -101,6 +104,13 @@ labels = load_label_frames()
 build_voice_feature_table(labels)
 build_text_feature_table(labels)
 PY
+
+# After the pipeline, regenerate SHAP TSV + SVG plots (200-sample holdout)
+PYTHONPATH=src python src/generate_feature_explanations.py \
+  --optuna-json results/YYYYMMDD_run1/optuna_xgb_full_<timestamp>.json \
+  --output-tsv results/YYYYMMDD_run1/shap_feature_importance.tsv \
+  --output-bar plots/shap_bar_top_features.svg \
+  --output-beeswarm plots/shap_beeswarm.svg
 ```
 
 This command:
