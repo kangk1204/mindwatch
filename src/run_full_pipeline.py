@@ -215,6 +215,7 @@ def evaluate_strategies(
     context: Dict[str, object],
     strategies: List[StrategyConfig],
     cv_folds: int,
+    exclude_prev_survey: bool = False,
 ) -> Dict[str, Dict[str, float]]:
     train_idx = context["train_idx"]  # type: ignore[index]
     val_idx = context["val_idx"]  # type: ignore[index]
@@ -292,6 +293,8 @@ def evaluate_strategies(
                 "screen_time",
                 "heart_rate",
             ]
+            if exclude_prev_survey:
+                extra_cols = [col for col in extra_cols if not col.startswith("prev_")]
             extra_cols = [col for col in extra_cols if col in dataset.columns]
             if extra_cols:
                 meta_train = meta_train.join(dataset.loc[train_mi, extra_cols], how="left")
@@ -467,6 +470,16 @@ def main() -> None:
     dataset = build_feature_dataframe(history_hours=args.history_hours)
     print(f"[Timer] Feature dataframe built in {format_seconds(time.time() - step_start)}")
 
+    if args.exclude_prev_survey:
+        drop_cols = [
+            col
+            for col in dataset.columns
+            if col.startswith("prev_")
+            or col.endswith("_prev_wave")
+            or col.endswith("_delta_prev_wave")
+        ]
+        dataset = dataset.drop(columns=drop_cols, errors="ignore")
+
     step_start = time.time()
     context = prepare_feature_context(
         dataset,
@@ -479,36 +492,69 @@ def main() -> None:
 
     defaults = {cfg.name: cfg for cfg in build_default_strategies(context)}
 
-    hgb_summary = latest_optuna_summary("hgb_top120", optuna_dir)
-    lgbm_summary = latest_optuna_summary("lgbm_full", optuna_dir)
-    xgb_summary = latest_optuna_summary("xgb_full", optuna_dir)
+    strategy_builders = {
+        "hgb_top120": build_hgb_strategy,
+        "lgbm_full": build_lgbm_strategy,
+        "xgb_full": build_xgb_strategy,
+    }
 
-    tuned_hgb = build_hgb_strategy(context, hgb_summary["best_params"])
-    tuned_lgbm = build_lgbm_strategy(context, lgbm_summary["best_params"])
-    tuned_xgb = build_xgb_strategy(context, xgb_summary["best_params"])
+    requested_keys = list(dict.fromkeys(args.strategies))
+    tuned_configs: Dict[str, StrategyConfig] = {}
+    for key in requested_keys:
+        builder = strategy_builders.get(key)
+        if builder is None:
+            warnings.warn(f"Unknown strategy '{key}' requested; skipping tuned build.")
+            continue
+        try:
+            summary = latest_optuna_summary(key, optuna_dir)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"{exc}. Provide optuna_{key}_*.json or run with --run-tuning."
+            ) from exc
+        tuned_configs[key] = builder(context, summary["best_params"])
 
-    # Update defaults
-    defaults["HGB_top120"] = StrategyConfig(
-        name="HGB_top120",
-        model_type="hgb",
-        features=tuned_hgb.features,
-        params=dict(defaults["HGB_top120"].params),
-        transform=defaults["HGB_top120"].transform,
-        use_sample_weights=defaults["HGB_top120"].use_sample_weights,
-    )
-    defaults["HGB_optuna_best"] = tuned_hgb
+    if "hgb_top120" in tuned_configs and "HGB_top120" in defaults:
+        tuned_hgb = tuned_configs["hgb_top120"]
+        defaults["HGB_top120"] = StrategyConfig(
+            name="HGB_top120",
+            model_type="hgb",
+            features=tuned_hgb.features,
+            params=dict(defaults["HGB_top120"].params),
+            transform=defaults["HGB_top120"].transform,
+            use_sample_weights=defaults["HGB_top120"].use_sample_weights,
+        )
 
-    strategies_to_eval = [
-        defaults["HGB_v1_base"],
-        defaults["HGB_v3_quantile"],
-        defaults["HGB_top120"],
-        tuned_hgb,
-        tuned_lgbm,
-        tuned_xgb,
-    ]
+    for cfg in tuned_configs.values():
+        defaults[cfg.name] = cfg
+
+    strategies_to_eval: List[StrategyConfig] = []
+    for name in ["HGB_v1_base", "HGB_v3_quantile", "HGB_top120"]:
+        cfg = defaults.get(name)
+        if cfg:
+            strategies_to_eval.append(cfg)
+
+    if "Voice_HGB" in defaults:
+        strategies_to_eval.insert(0, defaults["Voice_HGB"])
+    if "HGB_voice_text" in defaults:
+        insert_idx = 1 if strategies_to_eval else 0
+        strategies_to_eval.insert(insert_idx, defaults["HGB_voice_text"])
+
+    for key in requested_keys:
+        tuned_cfg = tuned_configs.get(key)
+        if tuned_cfg:
+            strategies_to_eval.append(tuned_cfg)
+
+    if not strategies_to_eval:
+        raise RuntimeError("No strategies available for evaluation. Check --strategies input.")
 
     step_start = time.time()
-    results = evaluate_strategies(dataset, context, strategies_to_eval, args.cv_folds)
+    results = evaluate_strategies(
+        dataset,
+        context,
+        strategies_to_eval,
+        args.cv_folds,
+        exclude_prev_survey=args.exclude_prev_survey,
+    )
     print(f"[Timer] Strategy evaluations finished in {format_seconds(time.time() - step_start)}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

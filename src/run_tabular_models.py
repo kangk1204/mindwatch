@@ -58,6 +58,8 @@ from train_tft import (
     load_hourly_sensor_frames,
     load_label_frames,
 )
+from voice_features import build_voice_feature_table
+from text_features import build_text_feature_table
 
 
 @dataclass
@@ -93,12 +95,20 @@ def participant_stratified_split(
         [["ID", "survey_wave", "target_binary"]]
     )
     participant_labels = entity_table.groupby("ID")["target_binary"].max()
+    participant_ids = participant_labels.index.to_numpy()
+    if len(participant_ids) < 2:
+        raise ValueError("At least two participants are required to build a validation split.")
+
     stratify_labels: Optional[np.ndarray]
     if participant_labels.nunique() > 1:
-        stratify_labels = participant_labels.values
+        class_counts = participant_labels.value_counts()
+        if (class_counts < 2).any():
+            stratify_labels = None
+        else:
+            stratify_labels = participant_labels.values
     else:
         stratify_labels = None
-    participant_ids = participant_labels.index.to_numpy()
+
     train_ids, val_ids = train_test_split(
         participant_ids,
         test_size=test_size,
@@ -305,6 +315,34 @@ def build_feature_dataframe(
         delta_cols = [f"{col}_delta_prev_wave" for col in cross_wave_cols]
         final_df[delta_cols] = final_df[delta_cols].fillna(0.0)
 
+    # Attach cached voice-derived statistics (MFCC, pitch, etc.).
+    voice_features = build_voice_feature_table(label_df)
+    if not voice_features.empty:
+        final_df = final_df.join(voice_features, how="left")
+
+    # Attach text/survey category encodings.
+    text_features = build_text_feature_table(label_df)
+    if not text_features.empty:
+        final_df = final_df.join(text_features, how="left")
+
+    # Ensure voice/text vectors do not introduce NaNs later in the pipeline.
+    voice_cols = [
+        col
+        for col in final_df.columns
+        if col.startswith("voice_")
+        or col.startswith("mfcc")
+        or col.startswith("spec_")
+        or col.startswith("chroma")
+        or col.startswith("tonnetz")
+        or col.startswith("pitch")
+    ]
+    if voice_cols:
+        final_df[voice_cols] = final_df[voice_cols].fillna(0.0)
+
+    text_cols = [col for col in final_df.columns if col.startswith("text_")]
+    if text_cols:
+        final_df[text_cols] = final_df[text_cols].fillna(0.0)
+
     final_df = final_df.replace([np.inf, -np.inf], np.nan)
     final_df = final_df[final_df["target_binary"].notna()]
     final_df["target_binary"] = final_df["target_binary"].astype(int)
@@ -331,6 +369,22 @@ def prepare_feature_context(
 
     static_cols = [col for col in STATIC_REALS if col in columns]
     time_cols = [col for col in TIME_VARYING_REALS if col in columns]
+    # Keep track of voice/text feature namespaces so specialised strategies can use them.
+    voice_cols = [
+        col
+        for col in columns
+        if col.startswith("voice_")
+        or col.startswith("mfcc")
+        or col.startswith("spec_")
+        or col.startswith("duration_")
+        or col.startswith("rms_")
+        or col.startswith("zcr_")
+        or col.startswith("chroma")
+        or col.startswith("tonnetz")
+        or col.startswith("pitch")
+        or col.startswith("voiced_")
+    ]
+    text_cols = [col for col in columns if col.startswith("text_")]
     extra_base_features = [
         col
         for col in [
@@ -351,6 +405,8 @@ def prepare_feature_context(
         extra_base_features,
         cross_wave_prev_cols,
         cross_wave_delta_cols,
+        voice_cols,
+        text_cols,
     )
 
     windows = [6, 12, 24, 48, 72, 240]
@@ -374,7 +430,6 @@ def prepare_feature_context(
     range_cols = [col for col in columns if "_range_w" in col]
     ewm_cols = [col for col in columns if "_ewm_span" in col]
     trend_cols = [col for col in columns if "_trend_w" in col]
-
     all_features = merge_feature_lists(
         columns,
         feature_base,
@@ -386,6 +441,8 @@ def prepare_feature_context(
         range_cols,
         ewm_cols,
         trend_cols,
+        voice_cols,
+        text_cols,
     )
 
     train_idx, val_idx = participant_stratified_split(
@@ -442,6 +499,8 @@ def prepare_feature_context(
         ewm_cols=ewm_cols,
         trend_cols=trend_cols,
         all_features=all_features,
+        voice_cols=voice_cols,
+        text_cols=text_cols,
         top_feature_names=top_feature_names,
         top_feature_pool=top_feature_pool,
         top_k_default=top_k_default,
@@ -450,6 +509,7 @@ def prepare_feature_context(
         train_idx=train_idx,
         val_idx=val_idx,
         base_importance_strategy=base_importance_strategy,
+        exclude_prev_survey=exclude_prev_survey,
     )
 
 
@@ -693,6 +753,8 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
     trend_cols = context["trend_cols"]  # type: ignore[index]
     all_features = context["all_features"]  # type: ignore[index]
     top_feature_pool = context["top_feature_pool"]  # type: ignore[index]
+    voice_cols = context.get("voice_cols", [])  # type: ignore[assignment]
+    text_cols = context.get("text_cols", [])  # type: ignore[assignment]
     top_k_default = context.get("top_k_default", len(top_feature_pool))  # type: ignore[arg-type]
     top_feature_names = top_feature_pool[:top_k_default]
     hgb_topk = top_feature_pool[: min(len(top_feature_pool), 94)]
@@ -703,7 +765,7 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
     def merge_features(*groups: List[str]) -> List[str]:
         return merge_feature_lists(columns, *groups)
 
-    return [
+    strategies = [
         StrategyConfig(
             name="HGB_v1_base",
             model_type="hgb",
@@ -925,6 +987,49 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
             use_sample_weights=True,
         ),
     ]
+    if voice_cols or text_cols:
+        strategies.append(
+            StrategyConfig(
+                name="HGB_voice_text",
+                model_type="hgb",
+                features=merge_features(feature_base, voice_cols, text_cols),
+                params=dict(
+                    loss="log_loss",
+                    learning_rate=0.03,
+                    max_leaf_nodes=255,
+                    max_depth=None,
+                    max_iter=520,
+                    l2_regularization=0.12,
+                    min_samples_leaf=20,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+                transform="quantile",
+                use_sample_weights=False,
+            )
+        )
+    if voice_cols:
+        strategies.append(
+            StrategyConfig(
+                name="Voice_HGB",
+                model_type="hgb",
+                features=merge_features(voice_cols),
+                params=dict(
+                    loss="log_loss",
+                    learning_rate=0.08,
+                    max_leaf_nodes=127,
+                    max_depth=4,
+                    max_iter=220,
+                    l2_regularization=0.12,
+                    min_samples_leaf=12,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+                transform="quantile",
+                use_sample_weights=False,
+            )
+        )
+    return strategies
 
 
 def _extract_group_labels(index: pd.Index) -> np.ndarray:
@@ -1087,6 +1192,8 @@ def main() -> None:
     train_idx = context["train_idx"]
     val_idx = context["val_idx"]
     base_importance_strategy = context["base_importance_strategy"]
+    voice_cols = context.get("voice_cols", [])
+    text_cols = context.get("text_cols", [])
 
     def merge_features(*feature_groups: List[str]) -> List[str]:
         return merge_feature_lists(dataset.columns, *feature_groups)
@@ -1313,6 +1420,48 @@ def main() -> None:
             use_sample_weights=True,
         ),
     ]
+    if voice_cols or text_cols:
+        strategies.append(
+            StrategyConfig(
+                name="HGB_voice_text",
+                model_type="hgb",
+                features=merge_features(feature_base, voice_cols, text_cols),
+                params=dict(
+                    loss="log_loss",
+                    learning_rate=0.03,
+                    max_leaf_nodes=255,
+                    max_depth=None,
+                    max_iter=520,
+                    l2_regularization=0.12,
+                    min_samples_leaf=20,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+                transform="quantile",
+                use_sample_weights=False,
+            )
+        )
+    if voice_cols:
+        strategies.append(
+            StrategyConfig(
+                name="Voice_HGB",
+                model_type="hgb",
+                features=merge_features(voice_cols),
+                params=dict(
+                    loss="log_loss",
+                    learning_rate=0.08,
+                    max_leaf_nodes=127,
+                    max_depth=4,
+                    max_iter=220,
+                    l2_regularization=0.12,
+                    min_samples_leaf=12,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+                transform="quantile",
+                use_sample_weights=False,
+            )
+        )
 
     os.makedirs("logs", exist_ok=True)
     results_summary = []
@@ -1385,6 +1534,10 @@ def main() -> None:
                 "screen_time",
                 "heart_rate",
             ]
+            if context.get("exclude_prev_survey"):
+                extra_meta_features = [
+                    col for col in extra_meta_features if not col.startswith("prev_")
+                ]
             extra_meta_features = [
                 col for col in extra_meta_features if col in dataset.columns
             ]

@@ -1,11 +1,11 @@
 # Mindwatch (Tabular AI for Mental Health)
 
-Mindwatch converts multi-modal wearables and EMA surveys into publication-ready predictive models for depressive symptoms. The pipeline is built around leakage-safe feature engineering, automated hyperparameter tuning, and rich evaluation outputs (plots, tables, JSON summaries) that you can drop directly into papers.
+Mindwatch converts multi-modal wearables, voice clips, and survey responses into publication-ready predictive models for depressive symptoms. The pipeline is built around leakage-safe feature engineering, automated hyperparameter tuning, and rich evaluation outputs (plots, tables, JSON summaries) that you can drop directly into papers.
 
 ## What's inside
 
 - **Leakage-safe feature builder** (`src/run_tabular_models.py`)  
-  Rolling statistics, cross-wave deltas, ratios, EWM trends, etc. are created in one controlled place with participant-level splits to prevent data leakage.
+  Rolling statistics, cross-wave deltas, ratios, EWM trends, text encodings, and voice descriptors are created in one controlled place with participant-level splits to prevent data leakage.
 - **Automation-ready pipeline** (`src/run_full_pipeline.py`)  
   Run tuning → evaluation → reporting with a single command; generates ROC/PR/calibration plots and publication tables automatically.
 - **Optuna tuning CLI** (`src/tune_tabular_models.py`)  
@@ -20,11 +20,12 @@ Mindwatch converts multi-modal wearables and EMA surveys into publication-ready 
 ## Repository layout
 
 ```
-00_input_data/          # hourly sensor data (user supplied, not tracked)
-00_label_data/          # survey sheets (user supplied, not tracked)
-logs/                   # Optuna studies, evaluation JSON, summary tables
-plots/                  # ROC / PR / calibration charts
-result_*/               # user-defined pipeline outputs (optional)
+00_input_data/          # hourly sensor data (user supplied, Git ignored)
+00_input_voice_data/    # raw mp3 clips (user supplied, Git ignored)
+00_label_data/          # survey sheets (user supplied, Git ignored)
+logs/                   # Optuna studies, evaluation JSON, summary tables (ignored)
+results/                # pipeline outputs (ignored)
+plots/                  # ROC / PR / calibration charts (ignored)
 src/
  ├─ run_full_pipeline.py         # one-click tuning + evaluation + reporting
  ├─ run_tabular_models.py        # feature builder + baseline sweep + stacking
@@ -61,11 +62,13 @@ source .venv/bin/activate
 
 # Install Python dependencies
 pip install --upgrade pip
-pip install pandas numpy scikit-learn optuna lightgbm xgboost catboost matplotlib torch pytorch-forcasting
-# or: pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
-> **Data**: Place hourly sensor CSVs in `00_input_data/` and survey/label spreadsheets in `00_label_data/`, following the filenames expected by `src/train_tft.py`. These folders are ignored by Git.
+> **Data**  
+> - Place hourly sensor CSVs in `00_input_data/` and survey/label workbooks in `00_label_data/`.  
+> - Drop per-participant voice folders in `00_input_voice_data/` (e.g., `participant_id/*.mp3`).  
+> - All of these directories are Git ignored by default.
 
 ## Quickstart: end-to-end pipeline
 
@@ -80,11 +83,24 @@ python src/run_full_pipeline.py \
   --cv-folds 5 \
   --top-k-features 120 \
   --top-k-min 40 \
-  --tuning-trials 100 \
+  --tuning-trials 50 \
   --use-gpu \
   --block-validation \
-  --study-name full_pipeline \
+  --study-name full_pipeline_voice_text_v2 \
   --output-dir results/YYYYMMDD_run1
+```
+
+Optional but recommended (runs faster once caches exist):
+
+```bash
+PYTHONPATH=src python - <<'PY'
+from train_tft import load_label_frames
+from voice_features import build_voice_feature_table
+from text_features import build_text_feature_table
+labels = load_label_frames()
+build_voice_feature_table(labels)
+build_text_feature_table(labels)
+PY
 ```
 
 This command:
@@ -142,15 +158,15 @@ python src/build_publication_tables.py --log-path results/<run>/full_pipeline_re
    - `logs/evaluation_XGB_best.json` (ROC/PR data, calibration curve, confusion matrices, best-F1/F2 thresholds, default threshold metrics)
 
 4. **Tabular deep learning baselines**  
-   ```bash
-   python src/train_tabular_dl.py \
-     --model-type mlp \
-     --history-hours 240 \
-     --cv-folds 5 \
-     --top-k-features 120 \
-     --top-k-min 40 \
-     --epochs 50 \
-     --batch-size 256
+  ```bash
+  python src/train_tabular_dl.py \
+    --model-type mlp \
+    --history-hours 240 \
+    --cv-folds 5 \
+    --top-k-features 120 \
+    --top-k-min 40 \
+    --epochs 50 \
+    --batch-size 256
    ```
    Results land in `logs/tabular_<model>_<scenario>_<timestamp>.json`.
 
@@ -173,8 +189,8 @@ python src/build_publication_tables.py --log-path results/<run>/full_pipeline_re
 ## Contributing
 
 1. Create a branch.
-2. Make changes and run the pipeline or targeted scripts to regenerate artifacts.
-3. Add updated plots/tables (`plots/`, `logs/`) relevant to your change.
+2. Make changes and run the pipeline or targeted scripts to regenerate artifacts (kept locally).
+3. Add updated plots/tables relevant to your change but keep large artifacts out of Git (the directories are ignored by default).
 4. Submit a PR with a brief summary of the results (holdout metrics, tuning settings).
 
 ---
