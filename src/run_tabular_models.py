@@ -385,6 +385,17 @@ def prepare_feature_context(
         or col.startswith("voiced_")
     ]
     text_cols = [col for col in columns if col.startswith("text_")]
+    sensor_prefixes = tuple(f"{feature}_" for feature in SENSOR_FEATURES)
+    sensor_cols = [
+        col
+        for col in columns
+        if col not in voice_cols
+        and not col.startswith("text_")
+        and (
+            col in SENSOR_FEATURES
+            or any(col.startswith(prefix) for prefix in sensor_prefixes)
+        )
+    ]
     extra_base_features = [
         col
         for col in [
@@ -501,6 +512,7 @@ def prepare_feature_context(
         all_features=all_features,
         voice_cols=voice_cols,
         text_cols=text_cols,
+        sensor_cols=sensor_cols,
         top_feature_names=top_feature_names,
         top_feature_pool=top_feature_pool,
         top_k_default=top_k_default,
@@ -755,6 +767,7 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
     top_feature_pool = context["top_feature_pool"]  # type: ignore[index]
     voice_cols = context.get("voice_cols", [])  # type: ignore[assignment]
     text_cols = context.get("text_cols", [])  # type: ignore[assignment]
+    sensor_cols = context.get("sensor_cols", [])  # type: ignore[assignment]
     top_k_default = context.get("top_k_default", len(top_feature_pool))  # type: ignore[arg-type]
     top_feature_names = top_feature_pool[:top_k_default]
     hgb_topk = top_feature_pool[: min(len(top_feature_pool), 94)]
@@ -1026,6 +1039,44 @@ def build_default_strategies(context: Dict[str, object]) -> List[StrategyConfig]
                     random_state=42,
                 ),
                 transform="quantile",
+                use_sample_weights=False,
+            )
+        )
+    if text_cols:
+        strategies.append(
+            StrategyConfig(
+                name="Text_HGB",
+                model_type="hgb",
+                features=merge_features(text_cols),
+                params=dict(
+                    loss="log_loss",
+                    learning_rate=0.06,
+                    max_leaf_nodes=63,
+                    max_depth=4,
+                    max_iter=260,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+                transform="quantile",
+                use_sample_weights=False,
+            )
+        )
+    if sensor_cols:
+        strategies.append(
+            StrategyConfig(
+                name="HGB_sensor_only",
+                model_type="hgb",
+                features=merge_features(sensor_cols),
+                params=dict(
+                    loss="log_loss",
+                    learning_rate=0.05,
+                    max_leaf_nodes=191,
+                    max_depth=6,
+                    max_iter=320,
+                    class_weight="balanced",
+                    random_state=42,
+                ),
+                transform=None,
                 use_sample_weights=False,
             )
         )
