@@ -1,6 +1,7 @@
 # sensitive data
 00_input_data/
 00_label_data/
+00_input_voice_data/
 
 # outputs / artifacts
 logs/
@@ -8,6 +9,10 @@ plots/
 lightning_logs/
 *.png
 *.json
+results/
+docs/
+fonts/
+*.docx
 
 # venv / cache
 .venv/
