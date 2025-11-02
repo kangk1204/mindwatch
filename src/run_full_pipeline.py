@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -7,7 +8,8 @@ import time
 import warnings
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -216,6 +218,7 @@ def evaluate_strategies(
     strategies: List[StrategyConfig],
     cv_folds: int,
     exclude_prev_survey: bool = False,
+    n_jobs: int = 1,
 ) -> Dict[str, Dict[str, float]]:
     train_idx = context["train_idx"]  # type: ignore[index]
     val_idx = context["val_idx"]  # type: ignore[index]
@@ -223,8 +226,9 @@ def evaluate_strategies(
     stacking_payloads: Dict[str, Dict[str, pd.Series]] = {}
 
     total = len(strategies)
-    cumulative = [0.0]
-    for idx, strategy in enumerate(strategies, 1):
+    cumulative = 0.0
+
+    def run_single(strategy: StrategyConfig) -> Tuple[StrategyConfig, Dict[str, float], Optional[Dict[str, pd.Series]], float]:
         start = time.time()
         metrics, payload = evaluate_strategy(
             dataset=dataset,
@@ -235,21 +239,46 @@ def evaluate_strategies(
             cv_splits=cv_folds,
             return_predictions=True,
         )
-        elapsed = time.time() - start
-        cumulative[0] += elapsed
-        avg = cumulative[0] / idx
-        remaining = avg * (total - idx)
-        print(
-            f"[Timer] {strategy.name} evaluated in {format_seconds(elapsed)} "
-            f"(ETA ~{format_seconds(max(0.0, remaining))})"
-        )
-        results[strategy.name] = metrics
-        if payload:
-            stacking_payloads[strategy.name] = payload
-        print(
-            f"{strategy.name}: holdout ROC-AUC {metrics['holdout_auc']:.4f} | "
-            f"CV mean {metrics['cv_mean']:.4f} ± {metrics['cv_std']:.4f}"
-        )
+        return strategy, metrics, payload, time.time() - start
+
+    if n_jobs <= 1 or total <= 1:
+        for idx, strategy in enumerate(strategies, 1):
+            strat, metrics, payload, elapsed = run_single(strategy)
+            cumulative += elapsed
+            avg = cumulative / idx
+            remaining = avg * (total - idx)
+            print(
+                f"[Timer] {strat.name} evaluated in {format_seconds(elapsed)} "
+                f"(ETA ~{format_seconds(max(0.0, remaining))})"
+            )
+            results[strat.name] = metrics
+            if payload:
+                stacking_payloads[strat.name] = payload
+            print(
+                f"{strat.name}: holdout ROC-AUC {metrics['holdout_auc']:.4f} | "
+                f"CV mean {metrics['cv_mean']:.4f} ± {metrics['cv_std']:.4f}"
+            )
+    else:
+        processed = 0
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            futures = {executor.submit(run_single, strategy): strategy for strategy in strategies}
+            for future in as_completed(futures):
+                strat, metrics, payload, elapsed = future.result()
+                processed += 1
+                cumulative += elapsed
+                avg = cumulative / processed
+                remaining = avg * (total - processed)
+                print(
+                    f"[Timer] {strat.name} evaluated in {format_seconds(elapsed)} "
+                    f"(ETA ~{format_seconds(max(0.0, remaining))})"
+                )
+                results[strat.name] = metrics
+                if payload:
+                    stacking_payloads[strat.name] = payload
+                print(
+                    f"{strat.name}: holdout ROC-AUC {metrics['holdout_auc']:.4f} | "
+                    f"CV mean {metrics['cv_mean']:.4f} ± {metrics['cv_std']:.4f}"
+                )
 
     stacking_info: Dict[str, float] = {}
     if stacking_payloads:
@@ -349,6 +378,34 @@ def evaluate_strategies(
             }
         print(f"[Timer] Stacking evaluation completed in {format_seconds(time.time() - stack_start)}")
 
+    fusion_map = {
+        "sensor": "HGB_sensor_only",
+        "voice": "Voice_HGB",
+        "text": "Text_HGB",
+    }
+    available_fusions = {
+        modality: stacking_payloads[name]
+        for modality, name in fusion_map.items()
+        if name in stacking_payloads
+    }
+    if len(available_fusions) >= 2:
+        holdout_table = pd.DataFrame(
+            {modality: payload["holdout"] for modality, payload in available_fusions.items()}
+        )
+        fused_preds = holdout_table.mean(axis=1)
+        anchor_payload = next(iter(available_fusions.values()))
+        y_holdout = anchor_payload["y_holdout"]
+        fused_auc = float(roc_auc_score(y_holdout.values, fused_preds.values))
+        modalities = sorted(available_fusions.keys())
+        print(
+            f"Late fusion ({' + '.join(modalities)} mean): holdout ROC-AUC {fused_auc:.4f}"
+        )
+        results["late_fusion"] = {
+            "modalities": modalities,
+            "holdout_auc": fused_auc,
+            "n_models": len(modalities),
+        }
+
     best_name, best_metrics = max(results.items(), key=lambda kv: kv[1]["holdout_auc"])
     best_strategy = next(s for s in strategies if s.name == best_name)
     block_metrics = evaluate_block_holdout(
@@ -367,7 +424,7 @@ def evaluate_strategies(
 def log_results(results: Dict[str, Dict[str, float]], output_path: Path) -> None:
     lines: List[str] = []
     for name, metrics in results.items():
-        if name in {"best", "stacking"}:
+        if name in {"best", "stacking", "late_fusion"}:
             continue
         lines.append(
             f"{name}: holdout={metrics['holdout_auc']:.4f}, "
@@ -399,9 +456,60 @@ def log_results(results: Dict[str, Dict[str, float]], output_path: Path) -> None
                 auc=stack["xgb_auc"],
             )
         )
+    if "late_fusion" in results:
+        fusion = results["late_fusion"]
+        modal_str = "+".join(fusion["modalities"])
+        lines.append(f"Late fusion ({modal_str} mean): holdout={fusion['holdout_auc']:.4f}")
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"\n[Pipeline] Results saved to {output_path}\n")
+
+
+def run_tabular_dl_baseline(args: argparse.Namespace) -> Optional[str]:
+    script_path = Path(__file__).parent / "train_tabular_dl.py"
+    cmd = [
+        args.python_exec,
+        str(script_path),
+        "--model-type",
+        "mlp",
+        "--history-hours",
+        str(args.history_hours),
+        "--cv-folds",
+        str(args.cv_folds),
+        "--split-seed",
+        str(args.split_seed),
+        "--top-k-features",
+        str(args.top_k_features),
+        "--top-k-min",
+        str(args.top_k_min),
+        "--epochs",
+        "20",
+        "--batch-size",
+        "256",
+        "--learning-rate",
+        "0.001",
+        "--output-dir",
+        str(LOG_DIR),
+    ]
+    if args.exclude_prev_survey:
+        cmd.append("--exclude-prev-survey")
+    cmd.extend(["--device", "cuda" if args.use_gpu else "cpu"])
+    print(f"[Pipeline] Launching tabular DL baseline: {' '.join(cmd)}")
+    try:
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        print("[Pipeline] Tabular DL baseline failed.")
+        if exc.stdout:
+            print(exc.stdout)
+        if exc.stderr:
+            print(exc.stderr, file=sys.stderr)
+        return None
+    if proc.stdout:
+        print(proc.stdout.strip())
+    if proc.stderr:
+        print(proc.stderr.strip(), file=sys.stderr)
+    match = re.search(r"Saved results to (.+)", proc.stdout)
+    return match.group(1).strip() if match else None
 
 
 def parse_args() -> argparse.Namespace:
@@ -417,6 +525,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use-gpu", action="store_true")
     parser.add_argument("--block-validation", action="store_true")
     parser.add_argument("--exclude-prev-survey", action="store_true")
+    parser.add_argument("--n-eval-jobs", type=int, default=1, help="Number of parallel workers for strategy evaluation.")
+    parser.add_argument("--run-tabular-dl", action="store_true", help="Train tabular deep learning baseline after tree-based evaluation.")
     parser.add_argument("--study-name", type=str, default="full_pipeline")
     parser.add_argument("--storage", type=str, default="sqlite:///logs/optuna_full_pipeline.db")
     parser.add_argument("--optuna-dir", type=str, default=None, help="Directory containing optuna_*.json files (defaults to --output-dir)")
@@ -538,6 +648,10 @@ def main() -> None:
     if "HGB_voice_text" in defaults:
         insert_idx = 1 if strategies_to_eval else 0
         strategies_to_eval.insert(insert_idx, defaults["HGB_voice_text"])
+    if "Text_HGB" in defaults and defaults["Text_HGB"] not in strategies_to_eval:
+        strategies_to_eval.append(defaults["Text_HGB"])
+    if "HGB_sensor_only" in defaults and defaults["HGB_sensor_only"] not in strategies_to_eval:
+        strategies_to_eval.append(defaults["HGB_sensor_only"])
 
     for key in requested_keys:
         tuned_cfg = tuned_configs.get(key)
@@ -554,12 +668,19 @@ def main() -> None:
         strategies_to_eval,
         args.cv_folds,
         exclude_prev_survey=args.exclude_prev_survey,
+        n_jobs=max(1, args.n_eval_jobs),
     )
     print(f"[Timer] Strategy evaluations finished in {format_seconds(time.time() - step_start)}")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = output_dir / f"full_pipeline_results_{timestamp}.txt"
     log_results(results, output_path)
+
+    dl_result_path = None
+    if args.run_tabular_dl:
+        dl_result_path = run_tabular_dl_baseline(args)
+        if dl_result_path:
+            print(f"[Pipeline] Tabular DL results saved to {dl_result_path}")
 
     print(f"[Timer] Total pipeline runtime {format_seconds(time.time() - overall_start)}")
 

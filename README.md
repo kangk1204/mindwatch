@@ -14,6 +14,8 @@ Mindwatch converts multi-modal wearables, voice clips, and survey responses into
   Outputs ROC/PR/calibration plots, confusion matrices, best-F1/F2 thresholds, and all metrics in JSON for reproducibility.
 - **Tabular deep learning baselines** (`src/train_tabular_dl.py`)  
   MLP/TabNet training on the engineered feature set for comparison against tree-based methods.
+- **Multi-modal fusion toolkit** (`src/run_full_pipeline.py`)  
+  Sensor-only, text-only, voice-only branches plus late-fusion reporting, parallel strategy evaluation (`--n-eval-jobs`), and optional DL benchmarking via `--run-tabular-dl`.
 - **Explainability toolkit** (`src/generate_feature_explanations.py`)  
   Rebuilds the tuned XGB model, computes permutation SHAP values on a leakage-safe holdout, and exports ranked TSV + SVG plots with Hangul-safe fonts.
 - **Publication helpers** (`src/build_publication_tables.py`)  
@@ -111,6 +113,17 @@ PYTHONPATH=src python src/generate_feature_explanations.py \
   --output-tsv results/YYYYMMDD_run1/shap_feature_importance.tsv \
   --output-bar plots/shap_bar_top_features.svg \
   --output-beeswarm plots/shap_beeswarm.svg
+
+# (Optional) Re-run pipeline with late-fusion reports and DL baseline
+python src/run_full_pipeline.py \
+  --history-hours 240 \
+  --cv-folds 5 \
+  --top-k-features 120 \
+  --top-k-min 40 \
+  --n-eval-jobs 4 \
+  --strategies hgb_top120 xgb_full \
+  --run-tabular-dl \
+  --output-dir results/YYYYMMDD_run1_fusion
 ```
 
 This command:
