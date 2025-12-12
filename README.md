@@ -201,7 +201,7 @@ python src/build_publication_tables.py --log-path results/<run>/full_pipeline_re
 - **LightGBM**: Requires a GPU-enabled build; otherwise the warning is suppressed and CPU training continues.
 - **CatBoost**: CPU by default; manually add `task_type=GPU` if your environment supports it.
 
-## How the pipeline works (end-to-end, reviewer-friendly)
+## How the pipeline works
 
 **1) Data in**  
 - Sensor CSVs (hourly or daily) in `00_input_data/`; daily signals are shifted +1 day to avoid look-ahead.  
