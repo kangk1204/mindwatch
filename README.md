@@ -1,6 +1,6 @@
 # MindWatch (Tabular AI for Mental Health)
 
-> This code is part of the project “Development of a Personalized Digital Mental Health Care Platform Combining Robotics, AI, and Community Services” (PI: Jung Jae Lee, Dankook University).
+> This code is part of the project “Development of a Personalized Digital Mental Health Care Platform Combining Robotics, AI, and Community Services” (PI: Prof. Jung Jae Lee, Dankook University).
 
 MindWatch converts multi-modal wearables, voice clips, and survey responses into publication-ready predictive models for depressive symptoms. The pipeline is built around leakage-safe feature engineering, automated hyperparameter tuning, and rich evaluation outputs (plots, tables, JSON summaries) that you can drop directly into papers.
 
