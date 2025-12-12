@@ -1,5 +1,7 @@
 # MindWatch (Tabular AI for Mental Health)
 
+> This code is part of the project “Development of a Personalized Digital Mental Health Care Platform Combining Robotics, AI, and Community Services” (PI: Jung Jae Lee, Dankook University).
+
 MindWatch converts multi-modal wearables, voice clips, and survey responses into publication-ready predictive models for depressive symptoms. The pipeline is built around leakage-safe feature engineering, automated hyperparameter tuning, and rich evaluation outputs (plots, tables, JSON summaries) that you can drop directly into papers.
 
 ## What's inside
@@ -198,6 +200,104 @@ python src/build_publication_tables.py --log-path results/<run>/full_pipeline_re
 - **XGBoost**: `--use-gpu` switches to `tree_method="gpu_hist"`. If CUDA is not available it automatically falls back to CPU `hist`.
 - **LightGBM**: Requires a GPU-enabled build; otherwise the warning is suppressed and CPU training continues.
 - **CatBoost**: CPU by default; manually add `task_type=GPU` if your environment supports it.
+
+## How the pipeline works (end-to-end, reviewer-friendly)
+
+**1) Data in**  
+- Sensor CSVs (hourly or daily) in `00_input_data/`; daily signals are shifted +1 day to avoid look-ahead.  
+- Voice clips (`00_input_voice_data/`), each mapped to the nearest future survey within 7 days only.  
+- Survey workbooks (`00_label_data/`); PHQ-9>=10 → `target_binary`. Text answers containing PHQ/GAD/DSM/Loneliness/target terms are blocklisted to prevent leakage.
+
+**2) Feature engineering (multi-modal → tabular)**  
+- Sensor: rolling mean/std/min/max/last (6–240h), ratios/deltas/z-scores/ranges, log1p (skewed), EWMs (6–72h), trends (12–168h), cross-wave deltas.  
+- Text: time-of-day, low-cardinality one-hot, higher-cardinality ordinal + string length, with blocklist applied.  
+- Voice: MFCC/deltas, spectral stats, chroma/tonnetz, pitch, voiced ratio, duration; aggregated per (ID, wave).  
+- Outputs a single feature matrix with participant-level train/val splits (no cross-person leakage).
+
+**3) Models (ML by default, DL optional)**  
+- Tree-based ML: HistGradientBoosting, LightGBM, XGBoost (+ CatBoost optional).  
+- Modalities: full multi-modal plus single-modality baselines (`HGB_sensor_only`, `Voice_HGB`, `Text_HGB`).  
+- Fusion: late-fusion mean of modality holdouts; stacking (blend, logistic, XGB meta).  
+- Optional DL: `--run-tabular-dl` trains MLP/TabNet baselines on the same tabular features.
+
+**4) Training flow**  
+- Optuna tuning per strategy (`--run-tuning`, default 50 trials) → saves `optuna_<strategy>_*.json`.  
+- Rebuild tuned configs, evaluate on participant-stratified splits (CV with fallback for small N), collect holdout/CV AUC.  
+- Stacking/late-fusion evaluated on top models. Best single model (fusion/stacking 제외) is rechecked on temporal block holdout (`--block-validation`) to show forward-looking performance.
+
+**5) Outputs & where to find them**  
+- Metrics: `results/<run>/full_pipeline_results_*.txt` (holdout/CV, stacking, late fusion, block validation).  
+- Plots: `results/<run>/plots/` (ROC/PR/Calibration for best/stacking/fusion).  
+- Tables: `logs/publication_table_metrics.(csv|md)` via `build_publication_tables.py`.  
+- Feature importance: SHAP bar/beeswarm + TSV via `generate_feature_explanations.py`.  
+- Model summaries: `plots/model_auc_summary.png`, `plots/model_block_vs_holdout.png` via `visualize_model_results.py`.  
+- Data quality/coverage: timeline/coverage/missingness via `visualize_data_coverage.py`, `src/visualize_missing_data.py`, `visualize_interactive.py`.  
+- PHQ-9 trajectories: `visualize_phq9_analysis.py` → `plots/phq9_timeline_interactive.html`.
+
+**6) One-command run (recommended defaults)**  
+```
+python src/run_full_pipeline.py \
+  --run-tuning \
+  --history-hours 240 \
+  --cv-folds 5 \
+  --top-k-features 120 \
+  --top-k-min 40 \
+  --tuning-trials 50 \
+  --use-gpu \
+  --block-validation \
+  --strategies hgb_top120 lgbm_full xgb_full HGB_sensor_only Voice_HGB Text_HGB \
+  --output-dir results/test_run
+```
+Then:
+```
+python src/build_publication_tables.py --log-path results/test_run/full_pipeline_results_*.txt
+python visualize_model_results.py --results-file results/test_run/full_pipeline_results_*.txt --output-dir plots
+PYTHONPATH=src python src/generate_feature_explanations.py --optuna-json results/test_run/optuna_xgb_full_*.json --output-tsv results/test_run/shap_feature_importance.tsv --output-bar plots/shap_bar_top_features.svg --output-beeswarm plots/shap_beeswarm.svg
+# Data quality/coverage
+python visualize_data_coverage.py
+python src/visualize_missing_data.py
+python visualize_interactive.py
+python visualize_phq9_analysis.py
+```
+
+## Recommended figures/tables for a paper
+
+- **Data coverage (timeline)**: `visualize_data_coverage.py` → `participant_timeline.png` (sensor spans + survey markers) and `sensor_coverage_detail.png` (per-sensor bars for selected participants). Good for “Data” section and missingness narrative.
+- **PHQ-9 trajectories**: `visualize_phq9_analysis.py` → `phq9_timeline_interactive.html` (anonymized severity-colored markers, wave-to-wave change lines). Useful to show outcome distribution and change.
+- **Interactive coverage**: `visualize_interactive.py` → `mindwatch_coverage_interactive.html` (anonymized hover, aggregated across all sensors). Use for supplementary materials/web appendix.
+- **Missingness summary**: `src/visualize_missing_data.py` → `missing_raw_sensors.png`, `missing_tabular_features.png` to document completeness.
+- **Model performance tables**: `build_publication_tables.py` on the latest `full_pipeline_results_*.txt` → `logs/publication_table_metrics.(csv|md)` for the Results section.
+- **Model curves**: ROC/PR/Calibration plots emitted by `run_full_pipeline.py` (in `results/.../plots/`) and SHAP bar/beeswarm from `generate_feature_explanations.py`.
+- **Model summary figures**: `visualize_model_results.py` → `plots/model_auc_summary.png` (holdout AUC bars incl. stacking/late fusion) and `plots/model_block_vs_holdout.png` (best model holdout vs. block validation).
+## Data and leakage safeguards (for papers)
+
+- **Participant-level splits**: Train/val partitions are built by participant ID to avoid cross-person leakage (`StratifiedGroupKFold`, `participant_stratified_split`). Block-validation can be enabled (`--block-validation`) to test temporal robustness by holding out the most recent participants.
+- **Sensor time shifting**: Daily aggregates (e.g., steps) are shifted by +1 day so values are only available after the day completes; hourly data are resampled to 1h and forward-filled with per-sensor medians.
+- **Voice clips**: Each MP3 is aligned to the nearest *future* survey within 7 days; clips recorded after a survey are not used for that survey to prevent look-ahead. Voice features are cached in `logs/voice_features.csv` with versioned metadata.
+- **Text features**: Survey free-text/categorical answers are encoded with one-hot/ordinal + length signals; PHQ/GAD/DSM/Loneliness and target fields are blocklisted to prevent label leakage. Caches live in `logs/text_features.csv` and track the configured label path.
+- **Cross-wave controls**: Previous-wave deltas/prev_* features are added but can be dropped with `--exclude-prev-survey` for ablation or strict leakage avoidance.
+
+## Feature engineering at a glance
+
+- **Sensor (hourly)**: rolling mean/std/min/max/last for windows 6/12/24/48/72/240h; ratios and deltas vs rolling means; z-scores and ranges; log1p of skewed signals; exponential weighted means (spans 6–72h); linear trends over 12/24/72/168h; cross-wave deltas (current vs previous survey).
+- **Static**: demographics (age, height, weight), categorical Sex encoded as codes.
+- **Voice**: duration, RMS, ZCR, spectral centroid/bandwidth/rolloff/flatness/contrast, chroma, tonnetz, MFCC + deltas, pitch stats, voiced ratio; aggregated per (ID, wave) with clip_count.
+- **Text**: time-of-day (bed/wake), low-cardinality one-hot, higher-cardinality ordinal encodings, string lengths.
+- **Targets**: `target_binary` derived from PHQ-9>=10; regression target `target_score` retained for TFT.
+
+## Modeling and evaluation
+
+- **Strategy zoo**: Predefined HGB/LGBM/XGB/CatBoost configs (`build_default_strategies`) plus tuned variants from Optuna JSON. Voice-only (`Voice_HGB`), text-only (`Text_HGB`), and sensor-only branches included for ablation.
+- **Tuning**: `src/tune_tabular_models.py` or the pipeline’s `--run-tuning` call Optuna with optional GPU, SQLite storage, and top-k feature sampling. Best params are cached as `optuna_<strategy>_*.json`.
+- **Evaluation**: Holdout ROC-AUC plus grouped CV mean/std; optional block holdout; ROC/PR/Calibration plots saved to `plots/`. Stacking meta-models (mean blend, logistic, XGB) are reported but excluded from “best” single-model selection to keep block-validation stable.
+- **Late fusion**: Sensor/voice/text means are reported when at least two modalities are available; recorded separately from single-model results.
+- **Deep learning baselines**: `train_tabular_dl.py` trains MLP/TabNet on the engineered tabular features; TFT utilities live in `train_tft.py`.
+
+## Caching and reproducibility
+
+- Voice/text feature caches are versioned (metadata JSON) and invalidate automatically when source mtimes or feature schema versions change.
+- Optuna studies can be persisted to SQLite via `--storage sqlite:///...` for resuming or cross-machine reproducibility.
+- All key metrics, curves, and thresholds are written to `logs/`/`results/` with timestamps; `build_publication_tables.py` converts the latest run into CSV/Markdown tables for manuscripts.
 - **HistGradientBoosting**: CPU-only.
 
 ## Troubleshooting

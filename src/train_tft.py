@@ -18,9 +18,14 @@ import numpy as np
 
 torch.set_float32_matmul_precision("medium")
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INPUT_DIR = os.path.join(BASE_DIR, "00_input_data")
-LABEL_DIR = os.path.join(BASE_DIR, "00_label_data")
+from utils import load_config, get_data_paths
+
+# Load configuration
+CONFIG = load_config()
+DATA_PATHS = get_data_paths(CONFIG)
+
+INPUT_DIR = str(DATA_PATHS["input"])
+LABEL_DIR = str(DATA_PATHS["label"])
 
 
 @dataclass
@@ -57,28 +62,16 @@ class BinaryCrossEntropy(MultiHorizonMetric):
         return self.to_prediction(y_pred)
 
 
+# Dynamic Sensor Map from Config
 SENSOR_FILE_MAP = {
-    "전체대상자_심박수_250905.csv": "heart_rate",
-    "전체대상자_심부체온_250901.csv": "core_temp",
-    "전체대상자_깊은수면시간_250905.csv": "deep_sleep",
-    "전체대상자_얕은수면시간_250905.csv": "light_sleep",
-    "전체대상자_렘수면시간_250905.csv": "rem_sleep",
-    "전체대상자_기상시간_250905.csv": "wake_time",
-    "전체대상자_스크린타임_250905.csv": "screen_time",
-    "전체대상자_걸음수_250905.csv": "steps",
-    "전체대상자_근접센서_250905.csv": "proximity",
-    "전체대상자_산소포화도_250905.csv": "spo2",
-    "전체대상자_HRV_250901.csv": "hrv",
-    "전체대상자_EMA_Stress_250905.csv": "ema_stress",
-    "전체대상자_EMA_Depression_250905.csv": "ema_depression",
-    "전체대상자_EMA_Anxiety_250905.csv": "ema_anxiety",
-    "전체대상자_EMA_Sleep_250905.csv": "ema_sleep",
+    filename: feature
+    for feature, filename in CONFIG.get("sensor_files", {}).items()
 }
 
-
+# Dynamic Label Sheets from Config
 LABEL_SHEETS = [
-    ("(PSS추가)전체대상자_천안설문_1회차_250905.xlsx", "전체대상자_천안설문_1회차_250905", 1),
-    ("(PSS추가)전체대상자_천안설문_2회차_250905.xlsx", "전체대상자_천안설문_2회차_250905", 2),
+    (item["filename"], item["sheet_name"], item["wave"])
+    for item in CONFIG.get("label_sheets", [])
 ]
 
 
@@ -175,6 +168,17 @@ def load_hourly_sensor_frames() -> Dict[str, pd.DataFrame]:
             df[value_cols] = df[value_cols].apply(pd.to_numeric, errors="coerce")
 
         df = df.set_index("timestamp")
+
+        # Detect daily data (e.g. Steps) and shift by 1 day to prevent look-ahead bias
+        # (Total daily steps are only known at the end of the day, so should be available starting tomorrow)
+        if len(df) > 1:
+            # Drop duplicates index if any before diff
+            temp_idx = df.index.to_series()
+            if not temp_idx.empty:
+                median_diff = temp_idx.diff().median()
+                if pd.notna(median_diff) and median_diff >= pd.Timedelta(hours=23):
+                    df.index = df.index + pd.Timedelta(days=1)
+
         hourly = df.resample("1h").mean()
         hourly = hourly.astype(np.float32)
         sensor_frames[feature_name] = hourly
@@ -194,6 +198,7 @@ def build_sample_sequence(
     survey_ts: pd.Timestamp,
     sensor_frames: Dict[str, pd.DataFrame],
     history_hours: int,
+    sensor_medians: Dict[str, float],
 ) -> Optional[pd.DataFrame]:
     timeline = pd.date_range(
         end=survey_ts.floor("h"),
@@ -213,8 +218,8 @@ def build_sample_sequence(
         return None
 
     data = data.ffill()
-    # still missing after forward-fill (e.g., leading gaps)
-    data = data.fillna(0.0)
+    # still missing after forward-fill (e.g., leading gaps) -> use global median
+    data = data.fillna(value=sensor_medians).fillna(0.0)
 
     for feature_name in SENSOR_FEATURES:
         series = data[feature_name]
@@ -223,7 +228,7 @@ def build_sample_sequence(
             series.shift(1)
             .rolling(window=24, min_periods=1)
             .mean()
-            .fillna(0.0)
+            .fillna(value=sensor_medians.get(feature_name, 0.0))
             .astype(np.float32)
         )
         roll_std = (
@@ -249,7 +254,14 @@ def build_model_dataframe(
     label_df: pd.DataFrame,
     sensor_frames: Dict[str, pd.DataFrame],
     cfg: Config,
+    sensor_medians: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
+    if sensor_medians is None:
+        sensor_medians = {}
+        for name, df in sensor_frames.items():
+            median_val = df.stack().median()
+            sensor_medians[name] = float(median_val) if pd.notna(median_val) else 0.0
+
     records: List[pd.DataFrame] = []
     for _, row in label_df.iterrows():
         seq = build_sample_sequence(
@@ -257,6 +269,7 @@ def build_model_dataframe(
             survey_ts=row["survey_timestamp"],
             sensor_frames=sensor_frames,
             history_hours=cfg.history_hours,
+            sensor_medians=sensor_medians,
         )
         if seq is None:
             continue

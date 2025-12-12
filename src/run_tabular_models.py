@@ -122,16 +122,12 @@ def participant_stratified_split(
     return train_idx, val_idx
 
 
-def build_feature_dataframe(
-    history_hours: int,
-    windows: Tuple[int, ...] = (6, 12, 24, 48, 72, 240),
-) -> pd.DataFrame:
-    cfg = Config(history_hours=history_hours, task="classification", use_class_weights=False)
-    label_df = load_label_frames()
-    sensor_frames = load_hourly_sensor_frames()
-    model_df = build_model_dataframe(label_df, sensor_frames, cfg)
 
-    model_df["target_binary"] = model_df["target_binary"].astype(float)
+def _compute_aggregated_blocks(
+    model_df: pd.DataFrame,
+    windows: Tuple[int, ...]
+) -> pd.DataFrame:
+    """Compute rolling window aggregations (mean, std, min, max, last)."""
     aggregated_blocks = []
     for window in windows:
         subset = model_df[model_df["time_idx"] >= -window + 1]
@@ -140,27 +136,14 @@ def build_feature_dataframe(
         )
         grouped.columns = [f"{feature}_{stat}_w{window}" for feature, stat in grouped.columns]
         aggregated_blocks.append(grouped)
-    aggregated_df = pd.concat(aggregated_blocks, axis=1)
+    return pd.concat(aggregated_blocks, axis=1)
 
-    final_df = model_df[model_df["time_idx"] == 0].copy().set_index(["ID", "survey_wave"])
-    final_df = final_df.join(aggregated_df, how="left")
 
-    timestamp_map = (
-        label_df[["ID", "survey_wave", "survey_timestamp"]]
-        .drop_duplicates()
-        .set_index(["ID", "survey_wave"])
-    )
-    final_df = final_df.join(timestamp_map, how="left")
-
-    if "survey_timestamp" in final_df.columns:
-        final_df = (
-            final_df.reset_index()
-            .sort_values(["ID", "survey_timestamp"])
-            .set_index(["ID", "survey_wave"])
-        )
-    else:
-        final_df = final_df.sort_index(level=["ID", "survey_wave"])
-
+def _add_lag_features(
+    final_df: pd.DataFrame,
+    label_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Add lagged survey scores and time since previous survey."""
     prev_label_columns = [
         "PHQ9_Score",
         "phq9_binary",
@@ -183,6 +166,7 @@ def build_feature_dataframe(
     prev_labels = label_features.groupby(level=0).shift(1)
     prev_labels = prev_labels.rename(columns={col: f"prev_{col}" for col in prev_labels.columns})
     final_df = final_df.join(prev_labels, how="left")
+    
     if "prev_survey_timestamp" in final_df.columns and "survey_timestamp" in final_df.columns:
         final_df["hours_since_prev_survey"] = (
             (final_df["survey_timestamp"] - final_df["prev_survey_timestamp"])
@@ -190,20 +174,31 @@ def build_feature_dataframe(
             .div(3600.0)
         )
         final_df = final_df.drop(columns=["prev_survey_timestamp"])
+        
     prev_numeric_cols = [
         col
         for col in final_df.columns
         if col.startswith("prev_") and col not in {"prev_survey_timestamp"}
     ]
     for col in prev_numeric_cols:
-        final_df[col] = final_df[col].astype(float).fillna(0.0)
-    if "hours_since_prev_survey" in final_df.columns:
-        final_df["hours_since_prev_survey"] = final_df["hours_since_prev_survey"].fillna(0.0)
+        final_df[col] = final_df[col].astype(float) # Removed fillna(0.0)
+        
+    # Removed fillna(0.0) for hours_since_prev_survey
+        
+    return final_df
 
+
+def _add_derived_metrics(
+    final_df: pd.DataFrame,
+    aggregated_df: pd.DataFrame,
+    windows: Tuple[int, ...]
+) -> pd.DataFrame:
+    """Compute ratios, deltas, z-scores, and ranges based on window stats."""
     ratio_values = {}
     delta_values = {}
     zscore_values = {}
     range_values = {}
+    
     for window in windows:
         mean_cols = [col for col in aggregated_df.columns if col.endswith(f"_mean_w{window}")]
         for col in mean_cols:
@@ -214,37 +209,48 @@ def build_feature_dataframe(
                     final_df[base] / denom
                 ).replace([np.inf, -np.inf], np.nan)
                 delta_values[f"{base}_delta_mean_w{window}"] = final_df[base] - final_df[col]
+                
                 std_col = col.replace("_mean_", "_std_")
                 if std_col in final_df.columns:
                     std_denom = final_df[std_col].replace(0.0, np.nan)
                     zscore_values[f"{base}_zscore_w{window}"] = (
                         (final_df[base] - final_df[col]) / std_denom
                     ).replace([np.inf, -np.inf], np.nan)
+                    
                 max_col = col.replace("_mean_", "_max_")
                 min_col = col.replace("_mean_", "_min_")
                 if max_col in final_df.columns and min_col in final_df.columns:
                     range_values[f"{base}_range_w{window}"] = final_df[max_col] - final_df[min_col]
 
     if ratio_values:
-        ratio_df = pd.DataFrame(ratio_values).fillna(0.0)
-        final_df = pd.concat([final_df, ratio_df], axis=1)
+        final_df = pd.concat([final_df, pd.DataFrame(ratio_values)], axis=1) # Removed fillna(0.0)
     if delta_values:
-        delta_df = pd.DataFrame(delta_values).fillna(0.0)
-        final_df = pd.concat([final_df, delta_df], axis=1)
+        final_df = pd.concat([final_df, pd.DataFrame(delta_values)], axis=1) # Removed fillna(0.0)
     if zscore_values:
-        zscore_df = pd.DataFrame(zscore_values).fillna(0.0)
-        final_df = pd.concat([final_df, zscore_df], axis=1)
+        final_df = pd.concat([final_df, pd.DataFrame(zscore_values)], axis=1) # Removed fillna(0.0)
     if range_values:
-        range_df = pd.DataFrame(range_values).fillna(0.0)
-        final_df = pd.concat([final_df, range_df], axis=1)
+        final_df = pd.concat([final_df, pd.DataFrame(range_values)], axis=1) # Removed fillna(0.0)
+        
+    return final_df
 
+
+def _add_log_transform(final_df: pd.DataFrame) -> pd.DataFrame:
+    """Apply log1p transform to specific skewed features."""
     for feature in ["steps", "screen_time", "proximity"]:
         if feature in final_df.columns:
             final_df[f"{feature}_log1p"] = np.log1p(final_df[feature].clip(lower=0))
+    return final_df
 
+
+def _add_ewm_features(
+    final_df: pd.DataFrame,
+    model_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Compute Exponential Weighted Moving Average (EWM) features."""
     ewm_frames = []
     ewm_spans = (6, 12, 24, 72)
     sorted_df = model_df.sort_values(["ID", "survey_wave", "time_idx"])
+    
     for span in ewm_spans:
         subset = sorted_df[sorted_df["time_idx"] >= -span + 1]
         if subset.empty:
@@ -261,12 +267,22 @@ def build_feature_dataframe(
             )
         ewm_stats.columns = [f"{col}_ewm_span{span}" for col in ewm_stats.columns]
         ewm_frames.append(ewm_stats)
+        
     if ewm_frames:
         ewm_df = pd.concat(ewm_frames, axis=1)
         final_df = final_df.join(ewm_df, how="left")
+    return final_df
 
+
+def _add_trend_features(
+    final_df: pd.DataFrame,
+    model_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Compute linear trend features (slope proxy)."""
     trend_frames = []
     trend_windows = (12, 24, 72, 168)
+    sorted_df = model_df.sort_values(["ID", "survey_wave", "time_idx"])
+    
     for window in trend_windows:
         subset = sorted_df[sorted_df["time_idx"] >= -window + 1]
         if subset.empty:
@@ -280,10 +296,15 @@ def build_feature_dataframe(
         trend = (last_vals - first_vals) / max(window - 1, 1)
         trend.columns = [f"{col}_trend_w{window}" for col in trend.columns]
         trend_frames.append(trend)
+        
     if trend_frames:
         trend_df = pd.concat(trend_frames, axis=1)
         final_df = final_df.join(trend_df, how="left")
+    return final_df
 
+
+def _add_cross_wave_features(final_df: pd.DataFrame) -> pd.DataFrame:
+    """Add features comparing current values to previous wave values."""
     if "Sex" in final_df.columns:
         final_df["Sex"] = final_df["Sex"].cat.codes.astype(np.int16)
     if "survey_wave" in final_df.index.names:
@@ -314,7 +335,64 @@ def build_feature_dataframe(
         final_df[prev_wave_cols] = final_df[prev_wave_cols].fillna(0.0)
         delta_cols = [f"{col}_delta_prev_wave" for col in cross_wave_cols]
         final_df[delta_cols] = final_df[delta_cols].fillna(0.0)
+    return final_df
 
+
+def build_feature_dataframe(
+    history_hours: int,
+    windows: Tuple[int, ...] = (6, 12, 24, 48, 72, 240),
+) -> pd.DataFrame:
+    cfg = Config(history_hours=history_hours, task="classification", use_class_weights=False)
+    label_df = load_label_frames()
+    sensor_frames = load_hourly_sensor_frames()
+    model_df = build_model_dataframe(label_df, sensor_frames, cfg)
+
+    model_df["target_binary"] = model_df["target_binary"].astype(float)
+    
+    # 1. Compute rolling aggregations
+    aggregated_df = _compute_aggregated_blocks(model_df, windows)
+
+    # 2. Join aggregations to base frame (time_idx=0)
+    final_df = model_df[model_df["time_idx"] == 0].copy().set_index(["ID", "survey_wave"])
+    final_df = final_df.join(aggregated_df, how="left")
+
+    # 3. Add timestamp mapping
+    timestamp_map = (
+        label_df[["ID", "survey_wave", "survey_timestamp"]]
+        .drop_duplicates()
+        .set_index(["ID", "survey_wave"])
+    )
+    final_df = final_df.join(timestamp_map, how="left")
+
+    # Sort index/values
+    if "survey_timestamp" in final_df.columns:
+        final_df = (
+            final_df.reset_index()
+            .sort_values(["ID", "survey_timestamp"])
+            .set_index(["ID", "survey_wave"])
+        )
+    else:
+        final_df = final_df.sort_index(level=["ID", "survey_wave"])
+
+    # 4. Add lag/history features
+    final_df = _add_lag_features(final_df, label_df)
+
+    # 5. Add derived metrics (ratios, deltas, zscores, ranges)
+    final_df = _add_derived_metrics(final_df, aggregated_df, windows)
+
+    # 6. Log transform skewed features
+    final_df = _add_log_transform(final_df)
+
+    # 7. Add EWM features
+    final_df = _add_ewm_features(final_df, model_df)
+
+    # 8. Add Trend features
+    final_df = _add_trend_features(final_df, model_df)
+
+    # 9. Add Cross-wave features
+    final_df = _add_cross_wave_features(final_df)
+
+    # 10. Attach Voice & Text Features
     # Attach cached voice-derived statistics (MFCC, pitch, etc.).
     voice_features = build_voice_feature_table(label_df)
     if not voice_features.empty:
@@ -326,23 +404,8 @@ def build_feature_dataframe(
         final_df = final_df.join(text_features, how="left")
 
     # Ensure voice/text vectors do not introduce NaNs later in the pipeline.
-    voice_cols = [
-        col
-        for col in final_df.columns
-        if col.startswith("voice_")
-        or col.startswith("mfcc")
-        or col.startswith("spec_")
-        or col.startswith("chroma")
-        or col.startswith("tonnetz")
-        or col.startswith("pitch")
-    ]
-    if voice_cols:
-        final_df[voice_cols] = final_df[voice_cols].fillna(0.0)
-
-    text_cols = [col for col in final_df.columns if col.startswith("text_")]
-    if text_cols:
-        final_df[text_cols] = final_df[text_cols].fillna(0.0)
-
+    # REMOVED: Arbitrary 0.0 fill. Let downstream imputation handle it.
+    
     final_df = final_df.replace([np.inf, -np.inf], np.nan)
     final_df = final_df[final_df["target_binary"].notna()]
     final_df["target_binary"] = final_df["target_binary"].astype(int)
@@ -671,66 +734,78 @@ def evaluate_strategy(
         raise ValueError(f"Unsupported model type: {strategy.model_type}")
 
     holdout_auc = roc_auc_score(y_val.values, val_pred)
+    train_pred_full = model.predict_proba(X_train_trans)[:, 1]
 
     groups_train = X_train_full.index.get_level_values(0)
+    unique_groups = np.unique(groups_train)
+    n_splits = min(cv_splits, len(unique_groups))
     oof_preds = np.zeros(len(X_train_full))
     cv_scores: List[float] = []
-    cv = StratifiedGroupKFold(n_splits=cv_splits, shuffle=True, random_state=42)
-    for fold_idx, (train_fold_idx, val_fold_idx) in enumerate(
-        cv.split(X_train_full, y_train_full, groups_train)
-    ):
-        X_fold_train = X_train_full.iloc[train_fold_idx]
-        X_fold_val = X_train_full.iloc[val_fold_idx]
-        y_fold_train = y_train_full.iloc[train_fold_idx]
-        y_fold_val = y_train_full.iloc[val_fold_idx]
 
-        fold_median = X_fold_train.median()
-        X_fold_train = X_fold_train.fillna(fold_median)
-        X_fold_val = X_fold_val.fillna(fold_median)
+    if n_splits < 2:
+        warnings.warn(
+            f"Insufficient unique groups ({len(unique_groups)}) for CV (requested {cv_splits}); "
+            "reusing full-train predictions for oof and setting CV stats to holdout metrics."
+        )
+        cv_scores = [holdout_auc]
+        oof_preds = train_pred_full
+    else:
+        cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        for fold_idx, (train_fold_idx, val_fold_idx) in enumerate(
+            cv.split(X_train_full, y_train_full, groups_train)
+        ):
+            X_fold_train = X_train_full.iloc[train_fold_idx]
+            X_fold_val = X_train_full.iloc[val_fold_idx]
+            y_fold_train = y_train_full.iloc[train_fold_idx]
+            y_fold_val = y_train_full.iloc[val_fold_idx]
 
-        fold_weights = compute_sample_weights(y_fold_train) if strategy.use_sample_weights else None
+            fold_median = X_fold_train.median()
+            X_fold_train = X_fold_train.fillna(fold_median)
+            X_fold_val = X_fold_val.fillna(fold_median)
 
-        if strategy.transform == "quantile":
-            qt_fold = QuantileTransformer(
-                output_distribution="normal",
-                n_quantiles=min(1000, len(X_fold_train)),
-                subsample=100000,
-                random_state=42,
-            )
-            X_fold_train_trans = qt_fold.fit_transform(X_fold_train)
-            X_fold_val_trans = qt_fold.transform(X_fold_val)
-        else:
-            X_fold_train_trans = X_fold_train.values
-            X_fold_val_trans = X_fold_val.values
+            fold_weights = compute_sample_weights(y_fold_train) if strategy.use_sample_weights else None
 
-        if strategy.model_type == "hgb":
-            model_cv = HistGradientBoostingClassifier(**strategy.params)
-            model_cv.fit(X_fold_train_trans, y_fold_train.values, sample_weight=fold_weights)
-            val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
-        elif strategy.model_type == "xgb":
-            model_cv = xgb.XGBClassifier(**strategy.params)
-            model_cv.fit(X_fold_train_trans, y_fold_train.values, sample_weight=fold_weights)
-            val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
-        elif strategy.model_type == "lgbm":
-            if lgb is None:
-                raise ImportError("lightgbm is not installed. Install it with `pip install lightgbm`.")
-            model_cv = lgb.LGBMClassifier(**strategy.params)
-            model_cv.fit(X_fold_train_trans, y_fold_train.values, sample_weight=fold_weights)
-            val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
-        elif strategy.model_type == "catboost":
-            if CatBoostClassifier is None:
-                raise ImportError("catboost is not installed. Install it with `pip install catboost`.")
-            model_cv = CatBoostClassifier(**strategy.params)
-            model_cv.fit(
-                X_fold_train_trans,
-                y_fold_train.values,
-                sample_weight=fold_weights,
-                verbose=False,
-            )
-            val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
-        cv_score = roc_auc_score(y_fold_val.values, val_pred_fold)
-        cv_scores.append(cv_score)
-        oof_preds[val_fold_idx] = val_pred_fold
+            if strategy.transform == "quantile":
+                qt_fold = QuantileTransformer(
+                    output_distribution="normal",
+                    n_quantiles=min(1000, len(X_fold_train)),
+                    subsample=100000,
+                    random_state=42,
+                )
+                X_fold_train_trans = qt_fold.fit_transform(X_fold_train)
+                X_fold_val_trans = qt_fold.transform(X_fold_val)
+            else:
+                X_fold_train_trans = X_fold_train.values
+                X_fold_val_trans = X_fold_val.values
+
+            if strategy.model_type == "hgb":
+                model_cv = HistGradientBoostingClassifier(**strategy.params)
+                model_cv.fit(X_fold_train_trans, y_fold_train.values, sample_weight=fold_weights)
+                val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
+            elif strategy.model_type == "xgb":
+                model_cv = xgb.XGBClassifier(**strategy.params)
+                model_cv.fit(X_fold_train_trans, y_fold_train.values, sample_weight=fold_weights)
+                val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
+            elif strategy.model_type == "lgbm":
+                if lgb is None:
+                    raise ImportError("lightgbm is not installed. Install it with `pip install lightgbm`.")
+                model_cv = lgb.LGBMClassifier(**strategy.params)
+                model_cv.fit(X_fold_train_trans, y_fold_train.values, sample_weight=fold_weights)
+                val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
+            elif strategy.model_type == "catboost":
+                if CatBoostClassifier is None:
+                    raise ImportError("catboost is not installed. Install it with `pip install catboost`.")
+                model_cv = CatBoostClassifier(**strategy.params)
+                model_cv.fit(
+                    X_fold_train_trans,
+                    y_fold_train.values,
+                    sample_weight=fold_weights,
+                    verbose=False,
+                )
+                val_pred_fold = model_cv.predict_proba(X_fold_val_trans)[:, 1]
+            cv_score = roc_auc_score(y_fold_val.values, val_pred_fold)
+            cv_scores.append(cv_score)
+            oof_preds[val_fold_idx] = val_pred_fold
 
     metrics = {
         "holdout_auc": holdout_auc,
@@ -1600,8 +1675,9 @@ def main() -> None:
                     dataset.loc[val_mi, extra_meta_features], how="left"
                 )
 
-            meta_train_df = meta_train_df.fillna(meta_train_df.mean())
-            meta_holdout_df = meta_holdout_df.fillna(meta_train_df.mean())
+            col_means = meta_train_df.mean()
+            meta_train_df = meta_train_df.fillna(col_means).fillna(0.0)
+            meta_holdout_df = meta_holdout_df.fillna(col_means).fillna(0.0)
 
             y_train_meta = stacking_payloads[selected_names[0]]["y_train"]
             y_holdout_meta = stacking_payloads[selected_names[0]]["y_holdout"]

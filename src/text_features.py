@@ -14,6 +14,8 @@ from typing import List, Tuple
 import numpy as np
 import pandas as pd
 
+from utils import load_config, get_data_paths
+
 CACHE_DIR = Path("logs")
 CACHE_PATH = CACHE_DIR / "text_features.csv"
 META_PATH = CACHE_DIR / "text_features_meta.json"
@@ -29,7 +31,10 @@ LABEL_BLOCKLIST = (
 )
 
 
-def _label_latest_mtime(label_dir: Path = Path("00_label_data")) -> float:
+def _label_latest_mtime(label_dir: Path | None = None) -> float:
+    if label_dir is None:
+        cfg = load_config()
+        label_dir = get_data_paths(cfg)["label"]
     if not label_dir.exists():
         return 0.0
     latest = 0.0
@@ -92,7 +97,9 @@ def build_text_feature_table(label_df: pd.DataFrame) -> pd.DataFrame:
     if label_df.empty:
         return pd.DataFrame()
 
-    label_mtime = _label_latest_mtime()
+    cfg = load_config()
+    label_dir = get_data_paths(cfg)["label"]
+    label_mtime = _label_latest_mtime(label_dir)
     cached = _load_cached_features(label_mtime)
     if cached is not None:
         return cached.set_index(["ID", "survey_wave"]).astype(np.float32)
@@ -140,7 +147,7 @@ def build_text_feature_table(label_df: pd.DataFrame) -> pd.DataFrame:
         lengths = series.astype(str).str.len().astype(np.float32)
         feature_frames.append(lengths.to_frame(name=f"text_{col}_strlen"))
 
-    # Higher-cardinality columns -> frequency encoding + length
+    # Higher-cardinality columns -> ordinal encoding + length
     for col in full.columns:
         if col in candidate_cols or full[col].dtype != object:
             continue
@@ -150,9 +157,13 @@ def build_text_feature_table(label_df: pd.DataFrame) -> pd.DataFrame:
             continue
         if series.nunique(dropna=False) <= 1:
             continue
-        freq = series.value_counts(normalize=True)
-        encoded = series.map(freq).fillna(0.0).astype(np.float32)
-        feature_frames.append(encoded.to_frame(name=f"text_{col}_freq"))
+        
+        # Switch to Ordinal Encoding to prevent frequency leakage from validation set
+        # pd.factorize returns (codes, uniques). codes are -1 for NaN, but we filled NaN.
+        codes, _ = pd.factorize(series)
+        encoded = pd.Series(codes, index=series.index).astype(np.float32)
+        
+        feature_frames.append(encoded.to_frame(name=f"text_{col}_ordinal"))
         lengths = series.astype(str).str.len().astype(np.float32)
         feature_frames.append(lengths.to_frame(name=f"text_{col}_strlen"))
 

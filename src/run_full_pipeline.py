@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
+from utils import generate_plots
 from run_tabular_models import (
     StrategyConfig,
     build_default_strategies,
@@ -329,8 +330,9 @@ def evaluate_strategies(
                 meta_train = meta_train.join(dataset.loc[train_mi, extra_cols], how="left")
                 meta_holdout = meta_holdout.join(dataset.loc[val_mi, extra_cols], how="left")
 
-            meta_train = meta_train.fillna(meta_train.mean())
-            meta_holdout = meta_holdout.fillna(meta_train.mean())
+            col_means = meta_train.mean()
+            meta_train = meta_train.fillna(col_means).fillna(0.0)
+            meta_holdout = meta_holdout.fillna(col_means).fillna(0.0)
 
             y_train = stacking_payloads[top_names[0]]["y_train"]
             y_holdout = stacking_payloads[top_names[0]]["y_holdout"]
@@ -357,13 +359,36 @@ def evaluate_strategies(
             blend_auc = float(roc_auc_score(y_holdout.values, blend.values))
 
             print(f"Blend (top-{len(base_cols)} mean): holdout ROC-AUC {blend_auc:.4f}")
+            generate_plots(
+                y_true=y_holdout.values,
+                y_scores=blend.values,
+                model_name="Blend_Ensemble",
+                output_dir=LOG_DIR / "plots",
+                prefix="stacking_blend"
+            )
+
             print(
                 f"Stacking (top-{len(base_cols)} LR, C={best_c:.3f}): holdout ROC-AUC {lr_auc:.4f}"
             )
+            generate_plots(
+                y_true=y_holdout.values,
+                y_scores=holdout_lr,
+                model_name="Stacking_LR",
+                output_dir=LOG_DIR / "plots",
+                prefix="stacking_lr"
+            )
+
             print(
                 "Stacking "
                 f"(top-{len(base_cols)} XGB, depth={xgb_params['max_depth']}, "
                 f"n_estimators={xgb_params['n_estimators']}): holdout ROC-AUC {xgb_auc:.4f}"
+            )
+            generate_plots(
+                y_true=y_holdout.values,
+                y_scores=holdout_xgb,
+                model_name="Stacking_XGB",
+                output_dir=LOG_DIR / "plots",
+                prefix="stacking_xgb"
             )
 
             stacking_info = {
@@ -400,14 +425,44 @@ def evaluate_strategies(
         print(
             f"Late fusion ({' + '.join(modalities)} mean): holdout ROC-AUC {fused_auc:.4f}"
         )
+        generate_plots(
+            y_true=y_holdout.values,
+            y_scores=fused_preds.values,
+            model_name="Late_Fusion_Mean",
+            output_dir=LOG_DIR / "plots",
+            prefix="late_fusion"
+        )
         results["late_fusion"] = {
             "modalities": modalities,
             "holdout_auc": fused_auc,
             "n_models": len(modalities),
         }
 
-    best_name, best_metrics = max(results.items(), key=lambda kv: kv[1]["holdout_auc"])
-    best_strategy = next(s for s in strategies if s.name == best_name)
+    # Determine best single-model strategy (exclude fusion/meta entries)
+    candidate_items = [
+        (name, metrics)
+        for name, metrics in results.items()
+        if name not in {"late_fusion", "stacking"}
+    ]
+    if not candidate_items:
+        raise RuntimeError("No strategy metrics available to select the best model.")
+    best_name, best_metrics = max(candidate_items, key=lambda kv: kv[1]["holdout_auc"])
+    strategy_lookup = {s.name: s for s in strategies}
+    best_strategy = strategy_lookup.get(best_name)
+    if best_strategy is None:
+        raise RuntimeError(f"Best strategy '{best_name}' not found in evaluated strategies.")
+    
+    if best_name in stacking_payloads:
+        print(f"[Pipeline] Generating plots for best strategy: {best_name}")
+        payload = stacking_payloads[best_name]
+        generate_plots(
+            y_true=payload["y_holdout"].values,
+            y_scores=payload["holdout"].values,
+            model_name=best_name,
+            output_dir=LOG_DIR / "plots",
+            prefix="best_single"
+        )
+
     block_metrics = evaluate_block_holdout(
         dataset=dataset,
         strategy=best_strategy,
@@ -638,25 +693,30 @@ def main() -> None:
         defaults[cfg.name] = cfg
 
     strategies_to_eval: List[StrategyConfig] = []
-    for name in ["HGB_v1_base", "HGB_v3_quantile", "HGB_top120"]:
-        cfg = defaults.get(name)
-        if cfg:
-            strategies_to_eval.append(cfg)
-
-    if "Voice_HGB" in defaults:
-        strategies_to_eval.insert(0, defaults["Voice_HGB"])
-    if "HGB_voice_text" in defaults:
-        insert_idx = 1 if strategies_to_eval else 0
-        strategies_to_eval.insert(insert_idx, defaults["HGB_voice_text"])
-    if "Text_HGB" in defaults and defaults["Text_HGB"] not in strategies_to_eval:
-        strategies_to_eval.append(defaults["Text_HGB"])
-    if "HGB_sensor_only" in defaults and defaults["HGB_sensor_only"] not in strategies_to_eval:
-        strategies_to_eval.append(defaults["HGB_sensor_only"])
-
+    
+    # Only evaluate strategies explicitly requested
     for key in requested_keys:
-        tuned_cfg = tuned_configs.get(key)
-        if tuned_cfg:
-            strategies_to_eval.append(tuned_cfg)
+        if key in tuned_configs:
+            strategies_to_eval.append(tuned_configs[key])
+        elif key in defaults:
+            strategies_to_eval.append(defaults[key])
+        else:
+            # Check for case-insensitive match in defaults (e.g. user passed 'voice_hgb', default is 'Voice_HGB')
+            found = False
+            for def_name, def_cfg in defaults.items():
+                if def_name.lower() == key.lower():
+                    strategies_to_eval.append(def_cfg)
+                    found = True
+                    break
+            if not found:
+                warnings.warn(f"Strategy '{key}' not found in defaults or tuned configs. Skipping.")
+
+    if not strategies_to_eval:
+        print("[Pipeline] No valid strategies found to evaluate. Checking defaults for fallback...")
+        # Fallback to defaults if nothing valid was found (e.g. typos)
+        for name in ["HGB_v1_base", "HGB_top120"]:
+            if name in defaults:
+                strategies_to_eval.append(defaults[name])
 
     if not strategies_to_eval:
         raise RuntimeError("No strategies available for evaluation. Check --strategies input.")
