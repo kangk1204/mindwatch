@@ -260,7 +260,7 @@ python visualize_interactive.py
 python visualize_phq9_analysis.py
 ```
 
-## Recommended figures/tables for a paper
+## Figures/tables
 
 - **Data coverage (timeline)**: `visualize_data_coverage.py` → `participant_timeline.png` (sensor spans + survey markers) and `sensor_coverage_detail.png` (per-sensor bars for selected participants). Good for “Data” section and missingness narrative.
 - **PHQ-9 trajectories**: `visualize_phq9_analysis.py` → `phq9_timeline_interactive.html` (anonymized severity-colored markers, wave-to-wave change lines). Useful to show outcome distribution and change.
