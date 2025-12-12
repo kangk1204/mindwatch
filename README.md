@@ -269,7 +269,7 @@ python visualize_phq9_analysis.py
 - **Model performance tables**: `build_publication_tables.py` on the latest `full_pipeline_results_*.txt` → `logs/publication_table_metrics.(csv|md)` for the Results section.
 - **Model curves**: ROC/PR/Calibration plots emitted by `run_full_pipeline.py` (in `results/.../plots/`) and SHAP bar/beeswarm from `generate_feature_explanations.py`.
 - **Model summary figures**: `visualize_model_results.py` → `plots/model_auc_summary.png` (holdout AUC bars incl. stacking/late fusion) and `plots/model_block_vs_holdout.png` (best model holdout vs. block validation).
-## Data and leakage safeguards (for papers)
+## Data and leakage safeguards
 
 - **Participant-level splits**: Train/val partitions are built by participant ID to avoid cross-person leakage (`StratifiedGroupKFold`, `participant_stratified_split`). Block-validation can be enabled (`--block-validation`) to test temporal robustness by holding out the most recent participants.
 - **Sensor time shifting**: Daily aggregates (e.g., steps) are shifted by +1 day so values are only available after the day completes; hourly data are resampled to 1h and forward-filled with per-sensor medians.
