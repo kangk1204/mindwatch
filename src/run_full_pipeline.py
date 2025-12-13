@@ -45,11 +45,15 @@ def format_seconds(seconds: float) -> str:
 
 
 def run_optuna_batch(args: argparse.Namespace, storage_uri: str) -> None:
+    tuning_targets = [s for s in args.strategies if s in {"hgb_top120", "lgbm_full", "xgb_full"}]
+    if not tuning_targets:
+        print("[Pipeline] No supported strategies for tuning; skipping Optuna stage.")
+        return
     cmd = [
         args.python_exec,
         str(Path(__file__).parent / "run_optuna_batch.py"),
         "--strategies",
-        *args.strategies,
+        *tuning_targets,
         "--history-hours",
         str(args.history_hours),
         "--cv-folds",
@@ -609,8 +613,9 @@ def main() -> None:
     if storage_uri == default_storage:
         storage_uri = f"sqlite:///{(optuna_dir / 'optuna_full_pipeline.db').as_posix()}"
 
+    tuning_targets = [s for s in args.strategies if s in {"hgb_top120", "lgbm_full", "xgb_full"}]
     missing_summaries = []
-    for strat in args.strategies:
+    for strat in tuning_targets:
         pattern = f"optuna_{strat}_*.json"
         if not list(optuna_dir.glob(pattern)):
             missing_summaries.append(strat)
@@ -623,13 +628,13 @@ def main() -> None:
         )
         args.run_tuning = True
 
-    if args.run_tuning:
+    if args.run_tuning and tuning_targets:
         tuning_start = time.time()
         run_optuna_batch(args, storage_uri)
         print(f"[Timer] Tuning stage completed in {format_seconds(time.time() - tuning_start)}")
-        backfill_optuna_summaries(args.strategies, optuna_dir)
+        backfill_optuna_summaries(tuning_targets, optuna_dir)
     else:
-        backfill_optuna_summaries(args.strategies, optuna_dir)
+        backfill_optuna_summaries(tuning_targets, optuna_dir)
 
     step_start = time.time()
     dataset = build_feature_dataframe(history_hours=args.history_hours)

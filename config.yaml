@@ -1,0 +1,33 @@
+# Data Directories
+input_data_dir: "00_input_data"
+label_data_dir: "00_label_data"
+voice_data_dir: "00_input_voice_data"
+
+# Sensor File Mapping
+# Maps the canonical feature name to the specific filename in the input directory.
+sensor_files:
+  heart_rate: "전체대상자_심박수_250905.csv"
+  core_temp: "전체대상자_심부체온_250901.csv"
+  deep_sleep: "전체대상자_깊은수면시간_250905.csv"
+  light_sleep: "전체대상자_얕은수면시간_250905.csv"
+  rem_sleep: "전체대상자_렘수면시간_250905.csv"
+  wake_time: "전체대상자_기상시간_250905.csv"
+  screen_time: "전체대상자_스크린타임_250905.csv"
+  steps: "전체대상자_걸음수_250905.csv"
+  proximity: "전체대상자_근접센서_250905.csv"
+  spo2: "전체대상자_산소포화도_250905.csv"
+  hrv: "전체대상자_HRV_250901.csv"
+  ema_stress: "전체대상자_EMA_Stress_250905.csv"
+  ema_depression: "전체대상자_EMA_Depression_250905.csv"
+  ema_anxiety: "전체대상자_EMA_Anxiety_250905.csv"
+  ema_sleep: "전체대상자_EMA_Sleep_250905.csv"
+
+# Label Data Sheets
+# List of excel files and sheets to load survey data from.
+label_sheets:
+  - filename: "(PSS추가)전체대상자_천안설문_1회차_250905.xlsx"
+    sheet_name: "전체대상자_천안설문_1회차_250905"
+    wave: 1
+  - filename: "(PSS추가)전체대상자_천안설문_2회차_250905.xlsx"
+    sheet_name: "전체대상자_천안설문_2회차_250905"
+    wave: 2
