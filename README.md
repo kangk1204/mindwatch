@@ -1,6 +1,6 @@
 # MindWatch (Tabular AI for Mental Health)
 
-> This code is part of the project “Development of a Personalized Digital Mental Health Care Platform Combining Robotics, AI, and Community Services” (PI: Jung Jae Lee, Dankook University).
+> This code is part of the project “Development of a Personalized Digital Mental Health Care Platform Combining Robotics, AI, and Community Services” (PI: Prof. Jung Jae Lee, Dankook University).
 
 MindWatch converts multi-modal wearables, voice clips, and survey responses into publication-ready predictive models for depressive symptoms. The pipeline is built around leakage-safe feature engineering, automated hyperparameter tuning, and rich evaluation outputs (plots, tables, JSON summaries) that you can drop directly into papers.
 
@@ -201,7 +201,7 @@ python src/build_publication_tables.py --log-path results/<run>/full_pipeline_re
 - **LightGBM**: Requires a GPU-enabled build; otherwise the warning is suppressed and CPU training continues.
 - **CatBoost**: CPU by default; manually add `task_type=GPU` if your environment supports it.
 
-## How the pipeline works (end-to-end, reviewer-friendly)
+## How the pipeline works
 
 **1) Data in**  
 - Sensor CSVs (hourly or daily) in `00_input_data/`; daily signals are shifted +1 day to avoid look-ahead.  
@@ -260,7 +260,7 @@ python visualize_interactive.py
 python visualize_phq9_analysis.py
 ```
 
-## Recommended figures/tables for a paper
+## Figures/tables
 
 - **Data coverage (timeline)**: `visualize_data_coverage.py` → `participant_timeline.png` (sensor spans + survey markers) and `sensor_coverage_detail.png` (per-sensor bars for selected participants). Good for “Data” section and missingness narrative.
 - **PHQ-9 trajectories**: `visualize_phq9_analysis.py` → `phq9_timeline_interactive.html` (anonymized severity-colored markers, wave-to-wave change lines). Useful to show outcome distribution and change.
@@ -269,7 +269,7 @@ python visualize_phq9_analysis.py
 - **Model performance tables**: `build_publication_tables.py` on the latest `full_pipeline_results_*.txt` → `logs/publication_table_metrics.(csv|md)` for the Results section.
 - **Model curves**: ROC/PR/Calibration plots emitted by `run_full_pipeline.py` (in `results/.../plots/`) and SHAP bar/beeswarm from `generate_feature_explanations.py`.
 - **Model summary figures**: `visualize_model_results.py` → `plots/model_auc_summary.png` (holdout AUC bars incl. stacking/late fusion) and `plots/model_block_vs_holdout.png` (best model holdout vs. block validation).
-## Data and leakage safeguards (for papers)
+## Data and leakage safeguards
 
 - **Participant-level splits**: Train/val partitions are built by participant ID to avoid cross-person leakage (`StratifiedGroupKFold`, `participant_stratified_split`). Block-validation can be enabled (`--block-validation`) to test temporal robustness by holding out the most recent participants.
 - **Sensor time shifting**: Daily aggregates (e.g., steps) are shifted by +1 day so values are only available after the day completes; hourly data are resampled to 1h and forward-filled with per-sensor medians.
