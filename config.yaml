@@ -1,0 +1,33 @@
+# Data Directories
+input_data_dir: "00_input_data"
+label_data_dir: "00_label_data"
+voice_data_dir: "00_input_voice_data"
+
+# Sensor File Mapping
+# Maps the canonical feature name to the specific filename in the input directory.
+sensor_files:
+  heart_rate: "heart_rate.csv"
+  core_temp: "core_temp.csv"
+  deep_sleep: "deep_sleep.csv"
+  light_sleep: "light_sleep.csv"
+  rem_sleep: "rem_sleep.csv"
+  wake_time: "wake_time.csv"
+  screen_time: "screen_time.csv"
+  steps: "steps.csv"
+  proximity: "proximity.csv"
+  spo2: "spo2.csv"
+  hrv: "hrv.csv"
+  ema_stress: "ema_stress.csv"
+  ema_depression: "ema_depression.csv"
+  ema_anxiety: "ema_anxiety.csv"
+  ema_sleep: "ema_sleep.csv"
+
+# Label Data Sheets
+# List of excel files and sheets to load survey data from.
+label_sheets:
+  - filename: "surveys.xlsx"
+    sheet_name: "wave_1"
+    wave: 1
+  - filename: "surveys.xlsx"
+    sheet_name: "wave_2"
+    wave: 2
