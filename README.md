@@ -54,7 +54,7 @@ src/
 
 ```bash
 # Clone and enter the repo
-git clone git@github.com:<YOUR_USERNAME>/mindwatch.git
+git clone https://github.com/kangk1204/mindwatch.git
 cd mindwatch
 
 # (Ubuntu) system dependencies
