@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mindwatch-research"
-version = "0.1.0"
+version = "0.2.0"
 description = "Code-only longitudinal mental-health research tools"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
@@ -14,15 +14,23 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "matplotlib>=3.8"]
+test = ["pytest>=8", "matplotlib>=3.8", "pyarrow>=14", "openpyxl>=3.1"]
 parquet = ["pyarrow>=14"]
+research = ["pyarrow>=14", "openpyxl>=3.1", "catboost>=1.2", "statsmodels>=0.14", "interpret-core>=0.6"]
+neural = ["torch>=2.2", "einops>=0.7", "timm>=1"]
+rocket = ["numba>=0.59"]
+speech = ["transformers>=4.40", "soundfile>=0.12", "av>=12", "librosa>=0.10", "sentencepiece>=0.2", "huggingface-hub>=0.23"]
 
 [project.scripts]
 mindwatch-longitudinal = "mindwatch.cli:main"
+mindwatch-research = "mindwatch.research.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["mindwatch*"]
+
+[tool.setuptools.package-data]
+"mindwatch.research" = ["hourly_stream.cpp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

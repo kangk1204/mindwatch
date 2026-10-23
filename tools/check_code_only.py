@@ -24,7 +24,8 @@ def allowed(path):
         return True
     if path in (".githooks/pre-commit", ".githooks/pre-push", ".github/workflows/code-only.yml"):
         return True
-    return bool(p.parts and p.parts[0] in ("src", "tests", "tools") and p.suffix == ".py")
+    return bool(p.parts and p.parts[0] in ("src", "tests", "tools") and
+                (p.suffix == ".py" or path == "src/mindwatch/research/hourly_stream.cpp"))
 
 
 def inspect_content(path, content, mode="100644"):

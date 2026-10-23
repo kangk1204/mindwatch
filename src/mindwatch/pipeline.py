@@ -28,8 +28,9 @@ def sha256(path):
 
 def source_digest():
     digest = hashlib.sha256()
-    for path in sorted(Path(__file__).parent.glob("*.py")):
-        digest.update(path.name.encode())
+    package = Path(__file__).parent
+    for path in sorted(p for p in package.rglob("*") if p.suffix in (".py", ".cpp")):
+        digest.update(str(path.relative_to(package)).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
 
