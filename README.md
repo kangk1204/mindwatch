@@ -1,321 +1,121 @@
-# MindWatch (Tabular AI for Mental Health)
+# MindWatch research code
 
-> This code is part of the project “Development of a Personalized Digital Mental Health Care Platform Combining Robotics, AI, and Community Services” (PI: Prof. Jung Jae Lee, Dankook University).
+Reusable code for longitudinal mental-health research. This repository distributes
+source code and software configuration only. It does not distribute datasets,
+analysis reports, individual predictions, recordings, embeddings, fitted weights,
+or clinical performance results. The existing [license](LICENSE) applies.
 
-MindWatch converts multi-modal wearables, voice clips, and survey responses into publication-ready predictive models for depressive symptoms. The pipeline is built around leakage-safe feature engineering, automated hyperparameter tuning, and rich evaluation outputs (plots, tables, JSON summaries) that you can drop directly into papers.
-
-## What's inside
-
-- **Leakage-safe feature builder** (`src/run_tabular_models.py`)  
-  Rolling statistics, cross-wave deltas, ratios, EWM trends, text encodings, and voice descriptors are created in one controlled place with participant-level splits to prevent data leakage. Text features automatically drop PHQ/GAD/DSM/Loneliness responses to avoid questionnaire leakage.
-- **Automation-ready pipeline** (`src/run_full_pipeline.py`)  
-  Run tuning → evaluation → reporting with a single command; generates ROC/PR/calibration plots and publication tables automatically.
-- **Optuna tuning CLI** (`src/tune_tabular_models.py`)  
-  Supports CPU/GPU tuning, persistent SQLite studies, time-block validation, and sampled feature budgets.
-- **Rich evaluation suite** (`src/evaluate_tabular_strategy.py`)  
-  Outputs ROC/PR/calibration plots, confusion matrices, best-F1/F2 thresholds, and all metrics in JSON for reproducibility.
-- **Tabular deep learning baselines** (`src/train_tabular_dl.py`)  
-  MLP/TabNet training on the engineered feature set for comparison against tree-based methods.
-- **Multi-modal fusion toolkit** (`src/run_full_pipeline.py`)  
-  Sensor-only, text-only, voice-only branches plus late-fusion reporting, parallel strategy evaluation (`--n-eval-jobs`), and optional DL benchmarking via `--run-tabular-dl`.
-- **Explainability toolkit** (`src/generate_feature_explanations.py`)  
-  Rebuilds the tuned XGB model, computes permutation SHAP values on a leakage-safe holdout, and exports ranked TSV + SVG plots with Hangul-safe fonts.
-- **Publication helpers** (`src/build_publication_tables.py`)  
-  Converts pipeline results into ready-to-use CSV/Markdown tables.
-
-## Repository layout
-
-```
-00_input_data/          # hourly sensor data (user supplied, Git ignored)
-00_input_voice_data/    # raw mp3 clips (user supplied, Git ignored)
-00_label_data/          # survey sheets (user supplied, Git ignored)
-logs/                   # Optuna studies, evaluation JSON, summary tables (ignored)
-results/                # pipeline outputs (ignored)
-plots/                  # ROC / PR / calibration charts (ignored)
-src/
- ├─ run_full_pipeline.py         # one-click tuning + evaluation + reporting
- ├─ run_tabular_models.py        # feature builder + baseline sweep + stacking
- ├─ tune_tabular_models.py       # Optuna CLI for individual strategies
- ├─ evaluate_tabular_strategy.py # detailed evaluation + plots
- ├─ run_optuna_batch.py          # helper to run multiple tuning jobs sequentially
- ├─ build_publication_tables.py  # turns pipeline results into CSV/Markdown tables
- ├─ train_tft.py                 # shared data-loading utilities for TFT
- ├─ train_tabular_dl.py          # MLP / TabNet baselines
- └─ generate_feature_explanations.py # SHAP-style feature importance TSV + SVGs
-```
-
-## Prerequisites
-
-- Python 3.10+ (tested on 3.12)
-- Ubuntu 22.04 LTS or macOS 13+ (Apple Silicon works; GPU tuning not supported there)
-- Optional CUDA GPU for XGBoost/LightGBM tuning
-
-### Installation
+## Install the lightweight longitudinal tools
 
 ```bash
-# Clone and enter the repo
-git clone https://github.com/kangk1204/mindwatch.git
-cd mindwatch
-
-# (Ubuntu) system dependencies
-sudo apt-get update && sudo apt-get install -y build-essential python3-venv
-
-# (macOS) ensure Command Line Tools are installed
-xcode-select --install
-
-# Create and activate virtualenv
-python3 -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-
-# Install Python dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -e '.[test]'
+python -m pytest
+git config core.hooksPath .githooks
+python tools/check_code_only.py
 ```
 
-> **Data**  
-> - Place hourly sensor CSVs in `00_input_data/` and survey/label workbooks in `00_label_data/`.  
-> - Drop per-participant voice folders in `00_input_voice_data/` (e.g., `participant_id/*.mp3`).  
-> - All of these directories are Git ignored by default.
+Parquet input additionally requires `pip install -e '.[parquet]'`. The original
+standalone sensor, voice, tabular and TFT scripts remain under `src/`; their
+optional dependencies are in `requirements.txt`. They are legacy research entry
+points, separate from the tested longitudinal package. The new tests do not
+constitute a scientific revalidation of those older pipelines. Voice is not an
+input to the longitudinal classifiers below.
 
-## Quickstart: end-to-end pipeline
+## Input contract
 
-The easiest way to train, tune, and collect paper-ready outputs is:
+Keep all input files and output directories outside every Git checkout. Use
+local CSV or Parquet files; do not commit example patient records.
+
+* Visits: `subject_id`, `index_date`, `phq9`, `gad7`, `isi`, and optional unique
+  `sample_id`. Supply every available historical visit for each assigned person.
+* Daily EMA: `subject_id`, `date`, `ema_depression`, `ema_anxiety`, `ema_sleep`,
+  `ema_stress`. Missing domains use NaN. Each domain must already be harmonized
+  to 0–10; no direction or unit is guessed.
+* Keys must be nonmissing. There must be at most one row per person/calendar
+  date in each table. Resolve duplicates and same-day repeat responses upstream.
+* Dates must be local, timezone-resolved calendar dates at midnight. This code
+  neither guesses UTC/KST nor resolves device clocks or raw export units.
+* Surveys use validated score ranges. Missing scores remain missing. Zero is a
+  score, not an inferred nonwear code. Raw device parsing needs its own audit.
+
+The current PHQ task includes people whose first observed PHQ is at least 5,
+keeps them after improvement, and predicts **current PHQ>=10 at later visits**.
+This is a questionnaire-defined screening outcome, not a diagnosis. The first
+visit supplies history and is not a prediction target. Every later visit can be
+a sample, while all samples from one person remain in a single population role.
+
+Current scores are attached as labels after feature construction. Survey history
+is available from the next calendar day. EMA uses only actual observations in
+`[visit date - lookback, visit date)`; same-day responses are excluded. No future
+observations, interpolated EMA, participant identifiers or current questionnaires
+are passed to a classifier. Own past history remains available for a new person
+whose records have never been used for population fitting.
+
+## Models and separate execution stages
+
+* `H`: 22 historical survey features, median imputation with missing indicators,
+  standard scaling and regularized logistic regression (`C=0.01`).
+* `compact`: previous PHQ plus each EMA domain's last value, median and age.
+  Train-only observation/variation filtering, median imputation, person-weighted
+  scaling, clipping and logistic regression (`C=1`).
+* Candidate EMA windows are fixed to 14, 30, 60 and 90 days. Select on raw
+  validation AUROC, with exact ties resolved by Brier, H, then shorter window.
+  This limited candidate search does not establish an optimal model.
+
+Assign **disjoint people** to training, selection, calibration and test roles
+before running. `mindwatch.validation.assign_roles` accepts baseline-only rows
+and provides a deterministic 60/10/10/20 helper split. Existing reserved test
+people must first be excluded from development. The training command has no test
+input. It fits preprocessing only on training people, chooses on selection
+people, and freezes models before the separate evaluation command can run.
 
 ```bash
-source .venv/bin/activate
+mindwatch-longitudinal train \
+  --train-visits "$PRIVATE_INPUT/train_visits.csv" \
+  --selection-visits "$PRIVATE_INPUT/selection_visits.csv" \
+  --calibration-visits "$PRIVATE_INPUT/calibration_visits.csv" \
+  --ema "$PRIVATE_INPUT/ema.csv" --output "$PRIVATE_OUTPUT/new_run"
 
-python src/run_full_pipeline.py \
-  --run-tuning \
-  --history-hours 240 \
-  --cv-folds 5 \
-  --top-k-features 120 \
-  --top-k-min 40 \
-  --tuning-trials 50 \
-  --use-gpu \
-  --block-validation \
-  --study-name full_pipeline_voice_text_v2 \
-  --output-dir results/YYYYMMDD_run1
+mindwatch-longitudinal evaluate \
+  --test-visits "$PRIVATE_INPUT/test_visits.csv" \
+  --ema "$PRIVATE_INPUT/ema.csv" --run "$PRIVATE_OUTPUT/new_run"
 ```
 
-Optional but recommended (runs faster once caches exist):
+Set `PRIVATE_INPUT` and `PRIVATE_OUTPUT` to approved private directories outside
+Git. The output run must not already exist. Artifacts use restricted filesystem
+permissions. Freeze records bind the model and source checksums. Evaluation
+rejects overlap with all development roles and never refits or reselects. Use
+only trusted local model files: joblib loading can execute code.
 
-```bash
-PYTHONPATH=src python - <<'PY'
-from train_tft import load_label_frames
-from voice_features import build_voice_feature_table
-from text_features import build_text_feature_table
-labels = load_label_frames()
-build_voice_feature_table(labels)
-build_text_feature_table(labels)
-PY
+Each participant has equal total evaluation/training weight. Offset-only
+calibration and a target-sensitivity threshold use separate calibration people;
+insufficient class support leaves calibration inactive. Evaluation computes raw
+and calibrated AUROC, AUPRC, Brier, diagnostic calibration intercept/slope and
+threshold metrics. The diagnostic calibration fit never changes predictions.
+This lightweight path does not implement confidence intervals or prospective
+calendar validation. Clinical or publication claims require the study-specific
+protocol and additional statistical evaluation.
 
-# After the pipeline, regenerate SHAP TSV + SVG plots (200-sample holdout)
-PYTHONPATH=src python src/generate_feature_explanations.py \
-  --optuna-json results/YYYYMMDD_run1/optuna_xgb_full_<timestamp>.json \
-  --output-tsv results/YYYYMMDD_run1/shap_feature_importance.tsv \
-  --output-bar plots/shap_bar_top_features.svg \
-  --output-beeswarm plots/shap_beeswarm.svg
+`mindwatch.features.ema_forecasts` is a **separate next-response EMA task** with
+previous-value and fixed P0 baselines. P0 averages the previous EMA and the median
+of up to three past EMA responses. It does not turn the PHQ classifier into an
+EMA forecasting model.
 
-# (Optional) Re-run pipeline with late-fusion reports and DL baseline
-python src/run_full_pipeline.py \
-  --history-hours 240 \
-  --cv-folds 5 \
-  --top-k-features 120 \
-  --top-k-min 40 \
-  --n-eval-jobs 4 \
-  --strategies hgb_top120 xgb_full \
-  --run-tabular-dl \
-  --output-dir results/YYYYMMDD_run1_fusion
-```
+## Confidentiality and contribution boundary
 
-This command:
-1. Runs Optuna tuning for HGB/LightGBM/XGB (reusing existing studies if present).
-2. Evaluates tuned strategies + stacking meta-ensemble.
-3. Saves:
-   - `results/.../full_pipeline_results_<timestamp>.txt`: holdout/CV metrics + stacking results
-   - `results/.../publication_table_metrics.(csv|md)`: ready-to-use performance tables
-   - ROC/PR/calibration plots in `plots/`
-   - Optuna JSON summaries + SQLite DB in `results/.../`
+`.gitignore`, local Git hooks, and a CI tracked-file checker reject datasets,
+models, analysis documents, logs, notebooks, binaries and private paths. Tests
+generate synthetic records at runtime in temporary directories; no record files
+are committed. The checker is a technical guard, not a guarantee against every
+secret or reidentification risk. Review the complete staged diff before pushing.
+Do not upload real data to CI, issues, pull requests, external inference APIs or
+test artifacts. CI does not upload artifacts.
 
-### Need only evaluation tables later?
-```
-python src/build_publication_tables.py --log-path results/<run>/full_pipeline_results_*.txt
-```
+Legacy scripts can still create local outputs. Run them in an approved private
+working directory with `MINDWATCH_CONFIG` pointing to a private YAML file. Do not
+commit that file. Example filenames in `config.yaml` are placeholders.
 
-## Manual workflow (advanced)
-
-1. **Baseline sweep**  
-   ```bash
-   python src/run_tabular_models.py --history-hours 240 --cv-folds 5
-   ```
-   Produces `logs/tabular_results.txt`, stacking metrics, and holdout summaries.
-
-2. **Strategy tuning** (single family)  
-   ```bash
-   python src/tune_tabular_models.py \
-     --strategy hgb_top120 \
-     --history-hours 240 \
-     --cv-folds 5 \
-     --trials 200 \
-     --top-k-features 120 \
-     --top-k-min 40 \
-     --block-validation \
-     --use-gpu \
-     --study-name hgb_tuning \
-     --storage sqlite:///logs/optuna_hgb.db
-   ```
-   Generates `logs/optuna_hgb_top120_<timestamp>.json` + SQLite study.
-
-3. **Detailed evaluation + plots**  
-   ```bash
-   python src/evaluate_tabular_strategy.py \
-     --strategy XGB_v5_full \
-     --history-hours 240 \
-     --cv-folds 5 \
-     --top-k-features 120 \
-     --top-k-min 40 \
-     --output-prefix XGB_best
-   ```
-   Outputs:
-   - `plots/roc_XGB_best.png`
-   - `plots/pr_XGB_best.png`
-   - `plots/calibration_XGB_best.png`
-   - `logs/evaluation_XGB_best.json` (ROC/PR data, calibration curve, confusion matrices, best-F1/F2 thresholds, default threshold metrics)
-
-4. **Tabular deep learning baselines**  
-  ```bash
-  python src/train_tabular_dl.py \
-    --model-type mlp \
-    --history-hours 240 \
-    --cv-folds 5 \
-    --top-k-features 120 \
-    --top-k-min 40 \
-    --epochs 50 \
-    --batch-size 256
-   ```
-   Results land in `logs/tabular_<model>_<scenario>_<timestamp>.json`.
-
-## GPU notes
-
-- **XGBoost**: `--use-gpu` switches to `tree_method="gpu_hist"`. If CUDA is not available it automatically falls back to CPU `hist`.
-- **LightGBM**: Requires a GPU-enabled build; otherwise the warning is suppressed and CPU training continues.
-- **CatBoost**: CPU by default; manually add `task_type=GPU` if your environment supports it.
-
-## How the pipeline works
-
-**1) Data in**  
-- Sensor CSVs (hourly or daily) in `00_input_data/`; daily signals are shifted +1 day to avoid look-ahead.  
-- Voice clips (`00_input_voice_data/`), each mapped to the nearest future survey within 7 days only.  
-- Survey workbooks (`00_label_data/`); PHQ-9>=10 → `target_binary`. Text answers containing PHQ/GAD/DSM/Loneliness/target terms are blocklisted to prevent leakage.
-
-**2) Feature engineering (multi-modal → tabular)**  
-- Sensor: rolling mean/std/min/max/last (6–240h), ratios/deltas/z-scores/ranges, log1p (skewed), EWMs (6–72h), trends (12–168h), cross-wave deltas.  
-- Text: time-of-day, low-cardinality one-hot, higher-cardinality ordinal + string length, with blocklist applied.  
-- Voice: MFCC/deltas, spectral stats, chroma/tonnetz, pitch, voiced ratio, duration; aggregated per (ID, wave).  
-- Outputs a single feature matrix with participant-level train/val splits (no cross-person leakage).
-
-**3) Models (ML by default, DL optional)**  
-- Tree-based ML: HistGradientBoosting, LightGBM, XGBoost (+ CatBoost optional).  
-- Modalities: full multi-modal plus single-modality baselines (`HGB_sensor_only`, `Voice_HGB`, `Text_HGB`).  
-- Fusion: late-fusion mean of modality holdouts; stacking (blend, logistic, XGB meta).  
-- Optional DL: `--run-tabular-dl` trains MLP/TabNet baselines on the same tabular features.
-
-**4) Training flow**  
-- Optuna tuning per strategy (`--run-tuning`, default 50 trials) → saves `optuna_<strategy>_*.json`.  
-- Rebuild tuned configs, evaluate on participant-stratified splits (CV with fallback for small N), collect holdout/CV AUC.  
-- Stacking/late-fusion evaluated on top models. Best single model (fusion/stacking 제외) is rechecked on temporal block holdout (`--block-validation`) to show forward-looking performance.
-
-**5) Outputs & where to find them**  
-- Metrics: `results/<run>/full_pipeline_results_*.txt` (holdout/CV, stacking, late fusion, block validation).  
-- Plots: `results/<run>/plots/` (ROC/PR/Calibration for best/stacking/fusion).  
-- Tables: `logs/publication_table_metrics.(csv|md)` via `build_publication_tables.py`.  
-- Feature importance: SHAP bar/beeswarm + TSV via `generate_feature_explanations.py`.  
-- Model summaries: `plots/model_auc_summary.png`, `plots/model_block_vs_holdout.png` via `visualize_model_results.py`.  
-- Data quality/coverage: timeline/coverage/missingness via `visualize_data_coverage.py`, `src/visualize_missing_data.py`, `visualize_interactive.py`.  
-- PHQ-9 trajectories: `visualize_phq9_analysis.py` → `plots/phq9_timeline_interactive.html`.
-
-**6) One-command run (recommended defaults)**  
-```
-python src/run_full_pipeline.py \
-  --run-tuning \
-  --history-hours 240 \
-  --cv-folds 5 \
-  --top-k-features 120 \
-  --top-k-min 40 \
-  --tuning-trials 50 \
-  --use-gpu \
-  --block-validation \
-  --strategies hgb_top120 lgbm_full xgb_full HGB_sensor_only Voice_HGB Text_HGB \
-  --output-dir results/test_run
-```
-Then:
-```
-python src/build_publication_tables.py --log-path results/test_run/full_pipeline_results_*.txt
-python visualize_model_results.py --results-file results/test_run/full_pipeline_results_*.txt --output-dir plots
-PYTHONPATH=src python src/generate_feature_explanations.py --optuna-json results/test_run/optuna_xgb_full_*.json --output-tsv results/test_run/shap_feature_importance.tsv --output-bar plots/shap_bar_top_features.svg --output-beeswarm plots/shap_beeswarm.svg
-# Data quality/coverage
-python visualize_data_coverage.py
-python src/visualize_missing_data.py
-python visualize_interactive.py
-python visualize_phq9_analysis.py
-```
-
-## Figures/tables
-
-- **Data coverage (timeline)**: `visualize_data_coverage.py` → `participant_timeline.png` (sensor spans + survey markers) and `sensor_coverage_detail.png` (per-sensor bars for selected participants). Good for “Data” section and missingness narrative.
-- **PHQ-9 trajectories**: `visualize_phq9_analysis.py` → `phq9_timeline_interactive.html` (anonymized severity-colored markers, wave-to-wave change lines). Useful to show outcome distribution and change.
-- **Interactive coverage**: `visualize_interactive.py` → `mindwatch_coverage_interactive.html` (anonymized hover, aggregated across all sensors). Use for supplementary materials/web appendix.
-- **Missingness summary**: `src/visualize_missing_data.py` → `missing_raw_sensors.png`, `missing_tabular_features.png` to document completeness.
-- **Model performance tables**: `build_publication_tables.py` on the latest `full_pipeline_results_*.txt` → `logs/publication_table_metrics.(csv|md)` for the Results section.
-- **Model curves**: ROC/PR/Calibration plots emitted by `run_full_pipeline.py` (in `results/.../plots/`) and SHAP bar/beeswarm from `generate_feature_explanations.py`.
-- **Model summary figures**: `visualize_model_results.py` → `plots/model_auc_summary.png` (holdout AUC bars incl. stacking/late fusion) and `plots/model_block_vs_holdout.png` (best model holdout vs. block validation).
-## Data and leakage safeguards
-
-- **Participant-level splits**: Train/val partitions are built by participant ID to avoid cross-person leakage (`StratifiedGroupKFold`, `participant_stratified_split`). Block-validation can be enabled (`--block-validation`) to test temporal robustness by holding out the most recent participants.
-- **Sensor time shifting**: Daily aggregates (e.g., steps) are shifted by +1 day so values are only available after the day completes; hourly data are resampled to 1h and forward-filled with per-sensor medians.
-- **Voice clips**: Each MP3 is aligned to the nearest *future* survey within 7 days; clips recorded after a survey are not used for that survey to prevent look-ahead. Voice features are cached in `logs/voice_features.csv` with versioned metadata.
-- **Text features**: Survey free-text/categorical answers are encoded with one-hot/ordinal + length signals; PHQ/GAD/DSM/Loneliness and target fields are blocklisted to prevent label leakage. Caches live in `logs/text_features.csv` and track the configured label path.
-- **Cross-wave controls**: Previous-wave deltas/prev_* features are added but can be dropped with `--exclude-prev-survey` for ablation or strict leakage avoidance.
-
-## Feature engineering at a glance
-
-- **Sensor (hourly)**: rolling mean/std/min/max/last for windows 6/12/24/48/72/240h; ratios and deltas vs rolling means; z-scores and ranges; log1p of skewed signals; exponential weighted means (spans 6–72h); linear trends over 12/24/72/168h; cross-wave deltas (current vs previous survey).
-- **Static**: demographics (age, height, weight), categorical Sex encoded as codes.
-- **Voice**: duration, RMS, ZCR, spectral centroid/bandwidth/rolloff/flatness/contrast, chroma, tonnetz, MFCC + deltas, pitch stats, voiced ratio; aggregated per (ID, wave) with clip_count.
-- **Text**: time-of-day (bed/wake), low-cardinality one-hot, higher-cardinality ordinal encodings, string lengths.
-- **Targets**: `target_binary` derived from PHQ-9>=10; regression target `target_score` retained for TFT.
-
-## Modeling and evaluation
-
-- **Strategy zoo**: Predefined HGB/LGBM/XGB/CatBoost configs (`build_default_strategies`) plus tuned variants from Optuna JSON. Voice-only (`Voice_HGB`), text-only (`Text_HGB`), and sensor-only branches included for ablation.
-- **Tuning**: `src/tune_tabular_models.py` or the pipeline’s `--run-tuning` call Optuna with optional GPU, SQLite storage, and top-k feature sampling. Best params are cached as `optuna_<strategy>_*.json`.
-- **Evaluation**: Holdout ROC-AUC plus grouped CV mean/std; optional block holdout; ROC/PR/Calibration plots saved to `plots/`. Stacking meta-models (mean blend, logistic, XGB) are reported but excluded from “best” single-model selection to keep block-validation stable.
-- **Late fusion**: Sensor/voice/text means are reported when at least two modalities are available; recorded separately from single-model results.
-- **Deep learning baselines**: `train_tabular_dl.py` trains MLP/TabNet on the engineered tabular features; TFT utilities live in `train_tft.py`.
-
-## Caching and reproducibility
-
-- Voice/text feature caches are versioned (metadata JSON) and invalidate automatically when source mtimes or feature schema versions change.
-- Optuna studies can be persisted to SQLite via `--storage sqlite:///...` for resuming or cross-machine reproducibility.
-- All key metrics, curves, and thresholds are written to `logs/`/`results/` with timestamps; `build_publication_tables.py` converts the latest run into CSV/Markdown tables for manuscripts.
-- **HistGradientBoosting**: CPU-only.
-
-## Troubleshooting
-
-| Issue | Resolution |
-| ----- | ---------- |
-| `PerformanceWarning: DataFrame is highly fragmented` | Safe to ignore; emitted by pandas during feature construction. |
-| Optuna tuning takes too long | Lower `--tuning-trials` or use `--n-jobs` for parallel CPU tuning. |
-| Missing Optuna summaries in custom folders | The pipeline copies the latest `optuna_*.json` from `logs/` automatically; you can also provide `--optuna-dir`. |
-| GPU warnings about fallback to CPU | Informational only; the run will continue using CPU methods. |
-
-## Contributing
-
-1. Create a branch.
-2. Make changes and run the pipeline or targeted scripts to regenerate artifacts (kept locally).
-3. Add updated plots/tables relevant to your change but keep large artifacts out of Git (the directories are ignored by default).
-4. Submit source-code changes only; keep study data and analysis outputs private.
-
----
-
-Questions or feedback? Open a private GitHub issue or reach the maintainers directly. Happy modeling! 🎯
+Previously tracked run logs are removed from the current tree by this change;
+removal does not erase older Git history. This change does not rewrite history.
