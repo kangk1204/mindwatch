@@ -115,6 +115,62 @@ responses may be used as inputs without using that person to fit the model.
 Synthetic tests check these rules, model saving/loading and the private-output
 restriction. Passing them verifies software behavior, not clinical accuracy.
 
+## The research toolbox
+
+The broader development code is available in `mindwatch.research`. It contains
+implementations and tests, without the private study files they were used with.
+
+| Area | Modules |
+| --- | --- |
+| Read and check inputs | `sources`, `clinical`, `parsing`, `metadata_audit`, `raw_hourly` |
+| Sensor features | `features`, `sensor_engineering`, `hourly_features`, `temporal_features`, `monitoring_data` |
+| Splits and evaluation | `temporal_splits`, `monitoring_splits`, `evaluation`, `benchmarks`, `oof_sensor` |
+| Models | `neural` (GRU-D, TCN and gated fusion), `mtm_adapter`, `sensor_models`, `neural_comparators`, `representations`, `stacking` |
+| Weekly EMA | `ema_personalization`, `ema_sequence`, `ema_joint`, `foundation` |
+| Frozen inference | `routing`, `registry` |
+| Robustness and summaries | `controls`, `missingness_stress`, `analyses`, `associations`, `monitoring_report` |
+
+Install the parts you need:
+
+```bash
+python -m pip install -e '.[test,research]'
+# Optional neural models:
+python -m pip install -e '.[neural]'
+# Optional external MiniRocket adapter:
+python -m pip install -e '.[rocket]'
+```
+
+`mindwatch-research --help` lists the research commands. Supply your own private
+input paths and study configuration. For monitoring runs, `private_workspace` in
+that configuration can point to a private workspace. All generated data, keys,
+reports and checkpoints must stay outside Git. Reports are never copied back
+into the installed package. The C++17 hourly parser needs `clang++` or `g++`.
+
+GRU-D, TCN and the EMA sequence comparator train from scratch on the supplied
+training data. Masked representations use only supplied training windows and
+rotate one eligible window per person per epoch. Split creation and feature
+selection must still happen inside the study's development procedure. The
+sequence comparator documents its own-training residual baseline; `oof_sensor`
+provides the separate time-OOF correction path.
+
+MTM and MiniRocket use explicitly prepared, hash-verified upstream source kept
+outside Git. Upstream licenses apply; their implementations are not redistributed
+here. MiniRocket setup is available through
+`mindwatch.research.minirocket_adapter.prepare_source`. Chronos-2 and Timestral
+wrappers accept already prepared local model directories. Their weights and
+optional runtime packages are not included, and fitting does not download them.
+
+The `routing` and `registry` APIs replace study-specific interfaces tied to
+private fitted models and participant lists. Create a new private registry from
+your own fitted predictors; no active clinical model is bundled. Historical
+report scripts, study-specific launchers and fitted manifests remain outside
+this repository. Their reusable methods are exposed through the modules above.
+The private research workspace is not synchronized wholesale.
+
+Local speech-processing code is also available as `mindwatch.research.speech`
+with the optional `speech` dependencies. Consent, task, speaker and review gates
+must be supplied explicitly. It remains separate from the H/compact workflow.
+
 ## Older scripts and contributions
 
 Earlier sensor, voice, tabular and TFT scripts remain in `src/`. Their optional
@@ -131,7 +187,7 @@ reports, logs and weights. Tests generate synthetic records at runtime, and CI
 does not upload artifacts. These checks help catch mistakes but cannot recognize
 every sensitive value. Never paste real records into issues, PRs or CI logs.
 
-Previously tracked run logs have been removed from the current files. They
-remain in older Git history; deleting a file does not erase that history.
+The default branch contains code only. Keep backups of earlier research
+workspaces private; do not merge their Git history into this repository.
 
 See [LICENSE](LICENSE) for reuse terms.
