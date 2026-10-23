@@ -28,7 +28,7 @@ def fixture():
                            [pd.Timestamp("2025-04-01") + pd.Timedelta(days=i) for i in range(80)] +
                            [pd.Timestamp("2025-07-01") + pd.Timedelta(days=i) for i in range(6)])
     frame = pd.DataFrame({"sample_id": [f"synthetic_sample_{i}" for i in range(n)],
-                           "subject_id": [f"synthetic_subject_{i%20}" for i in range(n)],
+                           "subject_id": [f"synthetic_subject_{i%80}" for i in range(n)],
                            "index_date": dates, "label_available_at": dates + pd.Timedelta(days=1),
                            "history_available": history, "sensor_available": sensor, "ema_available": ema,
                            "partition": "development", "y_phq9": labels.astype(object),

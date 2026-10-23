@@ -1,3 +1,9 @@
+
+# Historical driver: use the validated package entry points for new work.
+if __name__ == "__main__":
+    from utils import retired_legacy_training
+    retired_legacy_training()
+
 import argparse
 import json
 import re
@@ -78,7 +84,7 @@ def run_optuna_batch(args: argparse.Namespace, storage_uri: str) -> None:
     if args.block_validation:
         cmd.append("--block-validation")
 
-    print(f"\n[Pipeline] Launching Optuna batch: {' '.join(cmd)}\n", flush=True)
+    print("Launching Optuna batch locally.", flush=True)
     start = time.time()
     subprocess.run(cmd, check=True)
     duration = time.time() - start
@@ -553,7 +559,7 @@ def run_tabular_dl_baseline(args: argparse.Namespace) -> Optional[str]:
     if args.exclude_prev_survey:
         cmd.append("--exclude-prev-survey")
     cmd.extend(["--device", "cuda" if args.use_gpu else "cpu"])
-    print(f"[Pipeline] Launching tabular DL baseline: {' '.join(cmd)}")
+    print("Launching tabular DL baseline locally.")
     try:
         proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:

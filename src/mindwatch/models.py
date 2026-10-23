@@ -23,6 +23,17 @@ def person_weights(ids) -> np.ndarray:
     return weights/weights.mean()
 
 
+def _binary_vectors(y, p, ids, *, allow_empty=False):
+    """Validate labels before conversion; fractional scores are not classes."""
+    y, p, ids = np.asarray(y, float), np.asarray(p, float), np.asarray(ids)
+    if (y.ndim != 1 or p.ndim != 1 or ids.ndim != 1 or
+            not (len(y) == len(p) == len(ids)) or (not allow_empty and not len(y)) or
+            not np.isin(y, [0., 1.]).all() or not np.isfinite(p).all() or
+            not ((p >= 0) & (p <= 1)).all() or pd.isna(ids).any()):
+        raise ValueError("Aligned binary outcomes, probabilities and participant keys required")
+    return y.astype(int), p, ids
+
+
 def validate_x(x: pd.DataFrame):
     if tuple(x.columns) != FEATURE_COLUMNS:
         raise ValueError("Exact feature schema required; outcomes/identifiers are forbidden")
@@ -106,7 +117,10 @@ class Calibration:
 
 def calibrate(y, p, ids, min_people_per_class: int = 10) -> Calibration:
     """Offset-only calibration; choose a weighted sensitivity>=0.8 threshold."""
-    y, p, ids = np.asarray(y, int), np.asarray(p, float), np.asarray(ids)
+    y, p, ids = _binary_vectors(y, p, ids, allow_empty=True)
+    if (isinstance(min_people_per_class, (bool, np.bool_)) or
+            not isinstance(min_people_per_class, (int, np.integer)) or min_people_per_class < 1):
+        raise ValueError("Positive integer participant support required")
     if not len(y) or min(len(np.unique(ids[y == k])) for k in (0, 1)) < min_people_per_class:
         return Calibration()
     w, z = person_weights(ids), logit(np.clip(p, 1e-7, 1-1e-7))

@@ -1,8 +1,12 @@
 """Private local execution. This command does not upload data or telemetry."""
 import argparse
+import os
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+from .arguments import PrivateArgumentParser
 
 from .pipeline import evaluate_frozen, private_output, train_and_freeze
 
@@ -18,7 +22,8 @@ def read_table(path):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    os.umask(0o077)
+    parser = PrivateArgumentParser(description=__doc__)
     stages = parser.add_subparsers(dest="stage", required=True)
     train = stages.add_parser("train")
     for role in ("train", "selection", "calibration"):
@@ -30,15 +35,21 @@ def main(argv=None):
     evaluate.add_argument("--ema", required=True)
     evaluate.add_argument("--run", required=True)
     args = parser.parse_args(argv)
-    # Reject unsafe destination before loading any private inputs.
-    private_output(args.output if args.stage == "train" else args.run)
-    if args.stage == "train":
-        train_and_freeze(*(read_table(getattr(args, f"{role}_visits")) for role in ("train", "selection", "calibration")),
-                         read_table(args.ema), args.output)
-    else:
-        evaluate_frozen(args.run, read_table(args.test_visits), read_table(args.ema))
+    try:
+        # Reject unsafe destination before loading any private inputs.
+        private_output(args.output if args.stage == "train" else args.run)
+        if args.stage == "train":
+            train_and_freeze(*(read_table(getattr(args, f"{role}_visits")) for role in ("train", "selection", "calibration")),
+                             read_table(args.ema), args.output)
+        else:
+            evaluate_frozen(args.run, read_table(args.test_visits), read_table(args.ema))
+    except Exception as error:
+        # Parser exception messages can contain raw input cells or private paths.
+        print(f"Local execution failed ({type(error).__name__}). Check private inputs and configuration.", file=sys.stderr)
+        return 1
     print("Completed locally. Artifacts remain in the specified private directory.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

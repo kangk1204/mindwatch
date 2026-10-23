@@ -1,3 +1,9 @@
+
+# Historical driver: use the validated package entry points for new work.
+if __name__ == "__main__":
+    from utils import retired_legacy_training
+    retired_legacy_training()
+
 import argparse
 import os
 import time
@@ -743,12 +749,7 @@ def evaluate_strategy(
     cv_scores: List[float] = []
 
     if n_splits < 2:
-        warnings.warn(
-            f"Insufficient unique groups ({len(unique_groups)}) for CV (requested {cv_splits}); "
-            "reusing full-train predictions for oof and setting CV stats to holdout metrics."
-        )
-        cv_scores = [holdout_auc]
-        oof_preds = train_pred_full
+        raise ValueError("Insufficient participants for OOF; in-sample predictions are not OOF")
     else:
         cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
         for fold_idx, (train_fold_idx, val_fold_idx) in enumerate(

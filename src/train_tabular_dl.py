@@ -1,3 +1,9 @@
+
+# Historical driver: use the validated package entry points for new work.
+if __name__ == "__main__":
+    from utils import retired_legacy_training
+    retired_legacy_training()
+
 import argparse
 import json
 import os

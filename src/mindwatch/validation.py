@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
-from scipy.special import logit
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from .models import person_weights
+from .models import _binary_vectors, person_weights
+from .research.evaluation import calibration_parameters
 
 
 def assert_disjoint(*groups):
@@ -45,24 +44,17 @@ def assign_roles(baselines: pd.DataFrame, seed: int = 42) -> pd.DataFrame:
 
 
 def classification_metrics(y, p, ids, threshold=.5):
-    y, p = np.asarray(y, int), np.asarray(p, float)
-    if len(y) != len(p) or not np.isin(y, [0, 1]).all() or not np.isfinite(p).all() or not ((p >= 0) & (p <= 1)).all():
-        raise ValueError("Aligned binary outcomes and finite probabilities required")
+    y, p, ids = _binary_vectors(y, p, ids)
+    if not np.isscalar(threshold) or not np.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("A finite probability threshold is required")
     w = person_weights(ids)
-    if len(w) != len(y):
-        raise ValueError("Aligned participant keys required")
     both = np.unique(y).size == 2
     result = {"AUROC": float(roc_auc_score(y, p, sample_weight=w)) if both else None,
               "AUPRC": float(average_precision_score(y, p, sample_weight=w)) if both else None,
               "Brier": float(np.average((p-y)**2, weights=w)),
               "calibration_intercept": None, "calibration_slope": None}
     # Diagnostic fit on evaluation labels; never used to change predictions.
-    z = logit(np.clip(p, 1e-7, 1-1e-7))
-    if both and np.std(z) > 1e-8:
-        fit = minimize(lambda t: np.average(np.logaddexp(0, t[0]+t[1]*z)-y*(t[0]+t[1]*z), weights=w),
-                       np.array([0., 1.]), method="BFGS")
-        if fit.success:
-            result["calibration_intercept"], result["calibration_slope"] = map(float, fit.x)
+    result.update(calibration_parameters(y, p, w))
     positive = p >= threshold
     for name, mask, correct in (("sensitivity", y == 1, positive), ("specificity", y == 0, ~positive),
                                 ("PPV", positive, y == 1), ("NPV", ~positive, y == 0)):

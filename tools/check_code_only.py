@@ -52,7 +52,8 @@ def git(*args):
 
 
 def inspect_commit(commit):
-    failures = []
+    reasons = inspect_content("README.md", git("cat-file", "commit", commit))
+    failures = [("[commit metadata]", reasons)] if reasons else []
     for record in git("ls-tree", "-r", "-z", commit).split(b"\x00"):
         if not record:
             continue
@@ -66,6 +67,25 @@ def inspect_commit(commit):
     return failures
 
 
+def inspect_tag_chain(revision):
+    failures, seen = [], set()
+    while git("cat-file", "-t", revision).strip() == b"tag":
+        if revision in seen:
+            raise ValueError("Invalid tag chain")
+        seen.add(revision)
+        content = git("cat-file", "tag", revision)
+        reasons = inspect_content("README.md", content)
+        if reasons:
+            failures.append(("[tag metadata]", reasons))
+        first = content.splitlines()[0].decode("ascii")
+        if not re.fullmatch(r"object [0-9a-f]{40}", first):
+            raise ValueError("Invalid tag target")
+        revision = first.split()[1]
+    if git("cat-file", "-t", revision).strip() != b"commit":
+        raise ValueError("Only commits and tags pointing to commits may be published")
+    return failures
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--staged", action="store_true", help="Inspect index bytes, not working-tree bytes")
@@ -73,14 +93,27 @@ def main(argv=None):
     args = parser.parse_args(argv)
     failures = []
     if args.push:
+        inspected = set()
         for update in sys.stdin:
-            _, local_sha, _, _ = update.split()
+            fields = update.split()
+            if len(fields) != 4:
+                raise ValueError("Invalid push update")
+            _, local_sha, _, remote_sha = fields
             if local_sha == "0"*40:
                 continue
-            if not re.fullmatch(r"[0-9a-f]{40}", local_sha):
+            if not all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in (local_sha, remote_sha)):
                 raise ValueError("Invalid push ref")
-            commits = git("rev-list", local_sha, "--not", "--remotes").decode().splitlines()
+            # A local remote-tracking ref is not evidence that the receiving
+            # branch already has safe content (it may name a private remote).
+            failures.extend(inspect_tag_chain(local_sha))
+            revisions = (local_sha,) if remote_sha == "0"*40 else (local_sha, "^"+remote_sha)
+            commits = git("rev-list", *revisions).decode().splitlines()
+            # Recheck the outgoing tip even for an already-reachable update.
+            commits = [git("rev-parse", local_sha+"^{commit}").decode().strip(), *commits]
             for commit in commits:
+                if commit in inspected:
+                    continue
+                inspected.add(commit)
                 failures.extend(inspect_commit(commit))
         if failures:
             for path, reasons in failures:

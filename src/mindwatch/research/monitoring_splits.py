@@ -21,8 +21,8 @@ def _inputs(frame, mode, label_time_column):
     dates, labels, subjects = _validate(frame, label_time_column)
     if "prediction_time" in frame:
         prediction = _date_series(frame["prediction_time"])
-        if (prediction > dates).any():
-            raise ValueError("Prediction provenance cannot follow the index date.")
+        if not prediction.equals(dates):
+            raise ValueError("Prediction provenance must equal the index-date anchor; earlier prediction requires a separately anchored forecast protocol.")
         source = "provided_prediction_time"
     else:
         prediction, source = dates, "index_date_anchor_prediction_time_not_provided"

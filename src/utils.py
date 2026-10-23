@@ -5,6 +5,15 @@ import os
 import yaml
 
 
+def retired_legacy_training():
+    """Historical training drivers lack the current split/provenance contract."""
+    raise SystemExit(
+        "This historical training driver is retired: its preprocessing and model "
+        "selection do not meet the current leakage checks. Use mindwatch-longitudinal "
+        "or mindwatch-research with an explicit private dataset and split."
+    )
+
+
 def load_config(path=None):
     location = Path(path or os.environ.get("MINDWATCH_CONFIG", Path(__file__).resolve().parents[1]/"config.yaml"))
     with location.open(encoding="utf-8") as stream:

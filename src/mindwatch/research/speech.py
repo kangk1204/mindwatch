@@ -32,6 +32,57 @@ REVIEW_FIELDS = (
     "consent_status", "task", "speaker_status", "timestamp_status",
     "transcript_review", "deidentification_review", "leakage_review",
 )
+MAX_NESTED_ARCHIVE_BYTES = 512 * 1024**2
+
+
+def _private_path(path):
+    """Validate every file, even when a caller bypasses a directory helper."""
+    from mindwatch.pipeline import private_output
+    path = Path(path)
+    if path.is_symlink():
+        raise ValueError('Private output files cannot be symlinks')
+    return private_output(path)
+
+
+def _child(parent, name):
+    parent = Path(parent).resolve()
+    if not isinstance(name, str) or Path(name).name != name or name in {'', '.', '..'}:
+        raise ValueError('Invalid private artifact name')
+    path = parent / name
+    if path.is_symlink() or path.resolve().parent != parent:
+        raise ValueError('Private artifact must stay inside its declared directory')
+    return _private_path(path)
+
+
+def _source_fingerprint(path):
+    from .privacy import sha256
+    path = Path(path)
+    if not path.is_file():
+        raise ValueError('Regular audio source file required')
+    before = path.stat()
+    digest = sha256(path)
+    after = path.stat()
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise ValueError('Audio source changed while fingerprinting')
+    return {'fingerprint_version': 1, 'path': str(path.resolve()),
+            'size_bytes': after.st_size, 'sha256': digest}
+
+
+def _member_fingerprint(info, prefix):
+    return {prefix+'_name_sha256': hashlib.sha256(info.filename.encode('utf-8')).hexdigest(),
+            prefix+'_crc32': int(info.CRC), prefix+'_size': int(info.file_size)}
+
+
+def _bounded_copy(source, destination, limit):
+    total = 0
+    while True:
+        block = source.read(min(1024**2, limit - total + 1))
+        if not block:
+            return total
+        total += len(block)
+        if total > limit:
+            raise ValueError('Nested audio archive exceeds configured byte limit')
+        destination.write(block)
 
 
 def _private_dir(path: str | Path) -> Path:
@@ -43,22 +94,24 @@ def _private_dir(path: str | Path) -> Path:
 
 
 def _private_file(path: str | Path) -> Path:
-    path = Path(path)
+    path = _private_path(path)
     path.chmod(0o600)
     return path
 
 
 def _json_private(path: str | Path, value: object) -> None:
-    path = Path(path)
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as handle:
+    path = _private_path(path)
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0), 0o600), "w") as handle:
+        os.fchmod(handle.fileno(), 0o600)
         json.dump(value, handle, ensure_ascii=False, indent=2, default=str)
     _private_file(path)
 
 
 def _parquet_private(frame: pd.DataFrame, path: str | Path) -> None:
-    path = Path(path)
+    path = _private_path(path)
     # Create with restrictive mode before a writer has a chance to persist data.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    os.fchmod(fd, 0o600)
     os.close(fd)
     frame.to_parquet(path, index=False)
     _private_file(path)
@@ -116,7 +169,8 @@ def filename_datetime(filename: str) -> tuple[pd.Timestamp | None, str]:
     return None, "UNKNOWN"
 
 
-def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], output_dir: str | Path) -> dict:
+def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], output_dir: str | Path,
+                    max_nested_bytes: int = MAX_NESTED_ARCHIVE_BYTES) -> dict:
     """Inventory loose audio and audio in ZIPs, including one nested ZIP level.
 
     Does not decode, transcribe, or infer consent/task/speaker from filenames. Raw
@@ -128,14 +182,16 @@ def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], outp
         raise FileExistsError('Inventory version exists; use a new output directory.')
     if not root.is_dir():
         raise ValueError("Original directory is unavailable")
+    if not isinstance(max_nested_bytes, int) or isinstance(max_nested_bytes, bool) or max_nested_bytes < 1:
+        raise ValueError('Positive nested archive byte limit required')
     rows, sources, failures = [], {}, []
     matcher = subject_matcher(known_ids)
     from .sources import decoded_name
 
-    def add(source_id, name, member_index=-1, inner_member_index=-1, size=0):
+    def add(source_id, name, member_index=-1, inner_member_index=-1, size=0, member=None, child=None):
         stamp, provenance = filename_datetime(name)
         locator = f"{source_id}:{member_index}:{inner_member_index}"
-        rows.append({
+        row = {
             "recording_id": hashlib.sha256(locator.encode()).hexdigest()[:24],
             "subject_id": matcher(name), "recording_date": stamp,
             "timestamp_provenance": provenance, "source_id": source_id,
@@ -144,13 +200,19 @@ def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], outp
             "speaker_status": "unknown", "timestamp_status": "unknown",
             "transcript_review": "unknown", "deidentification_review": "unknown",
             "leakage_review": "unknown",
-        })
+            'fingerprint_version': 1, 'source_sha256': sources[source_id]['sha256'],
+            **{prefix+suffix: ('' if suffix=='_name_sha256' else -1)
+               for prefix in ('member', 'child') for suffix in ('_name_sha256','_crc32','_size')},
+        }
+        if member is not None:row.update(_member_fingerprint(member, 'member'))
+        if child is not None:row.update(_member_fingerprint(child, 'child'))
+        rows.append(row)
 
     for source in sorted(root.rglob("*")):
         if not source.is_file() or source.suffix.lower() not in AUDIO_SUFFIXES | {".zip"}:
             continue
         source_id = hashlib.sha256(str(source.relative_to(root)).encode()).hexdigest()[:24]
-        sources[source_id] = str(source.resolve())
+        sources[source_id] = _source_fingerprint(source)
         if source.suffix.lower() in AUDIO_SUFFIXES:
             add(source_id, source.name, size=source.stat().st_size)
             continue
@@ -161,18 +223,20 @@ def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], outp
                         continue
                     suffix = Path(info.filename).suffix.lower()
                     if suffix in AUDIO_SUFFIXES:
-                        add(source_id, decoded_name(info), i, size=info.file_size)
+                        add(source_id, decoded_name(info), i, size=info.file_size, member=info)
                     elif suffix == ".zip":
                         try:
+                            if info.file_size > max_nested_bytes:
+                                raise ValueError('Nested archive exceeds configured byte limit')
                             # Avoid keeping large nested archives wholly in RAM.
                             with tempfile.SpooledTemporaryFile(max_size=64 * 1024**2) as spool:
                                 with archive.open(info) as nested:
-                                    shutil.copyfileobj(nested, spool)
+                                    _bounded_copy(nested, spool, max_nested_bytes)
                                 spool.seek(0)
                                 with zipfile.ZipFile(spool) as inner:
                                     for j, child in enumerate(inner.infolist()):
                                         if not child.is_dir() and Path(child.filename).suffix.lower() in AUDIO_SUFFIXES:
-                                            add(source_id, decoded_name(child), i, j, child.file_size)
+                                            add(source_id, decoded_name(child), i, j, child.file_size, member=info, child=child)
                                         elif not child.is_dir() and Path(child.filename).suffix.lower() == ".zip":
                                             failures.append({"source_id": source_id, "member_index": i,
                                                              "inner_member_index": j, "reason": "deeper_nesting_unsupported"})
@@ -181,7 +245,9 @@ def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], outp
         except Exception as error:
             failures.append({"source_id": source_id, "reason": _safe_error(error)})
     columns = ["recording_id", "subject_id", "recording_date", "timestamp_provenance", "source_id",
-               "member_index", "inner_member_index", "byte_size", *REVIEW_FIELDS]
+               "member_index", "inner_member_index", "byte_size", *REVIEW_FIELDS,
+               'fingerprint_version', 'source_sha256',
+               *[prefix+suffix for prefix in ('member','child') for suffix in ('_name_sha256','_crc32','_size')]]
     frame = pd.DataFrame(rows, columns=columns)
     frame["recording_date"] = pd.to_datetime(frame["recording_date"])
     _parquet_private(frame, out / "audio_inventory.parquet")
@@ -198,29 +264,68 @@ def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], outp
     return summary
 
 
-def read_recording_bytes(record: Mapping, sources: Mapping[str, str], max_bytes: int = 512 * 1024**2) -> bytes:
+def read_recording_bytes(record: Mapping, sources: Mapping, max_bytes: int = 512 * 1024**2,
+                         max_nested_bytes: int = MAX_NESTED_ARCHIVE_BYTES, *, _verified_sources=None) -> bytes:
     """Reopen a private archive locator without extracting patient files to disk."""
-    path = Path(sources[str(record["source_id"])])
+    source = sources[str(record['source_id'])]
+    if not isinstance(source, Mapping) or source.get('fingerprint_version') != 1 or record.get('fingerprint_version') != 1:
+        raise ValueError('Legacy audio locator lacks fingerprints; regenerate the inventory')
+    if source.get('sha256') != record.get('source_sha256') or not re.fullmatch(r'[0-9a-f]{64}', str(source.get('sha256', ''))):
+        raise ValueError('Audio source fingerprint mismatch; regenerate the inventory')
+    if any(not isinstance(v, int) or isinstance(v, bool) or v < 1 for v in (max_bytes, max_nested_bytes)):
+        raise ValueError('Positive audio byte limits required')
+    path = Path(source['path'])
+    stat = path.stat()
+    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    key = (str(path.resolve()), source['sha256'])
+    cache = {} if _verified_sources is None else _verified_sources
+    if cache.get(key) != signature:
+        actual = _source_fingerprint(path)
+        if actual['sha256'] != source['sha256'] or actual['size_bytes'] != source.get('size_bytes'):
+            raise ValueError('Audio source changed since inventory; regenerate the inventory')
+        cache[key] = signature
+    def finish(data):
+        end = path.stat()
+        if (end.st_dev,end.st_ino,end.st_size,end.st_mtime_ns,end.st_ctime_ns) != signature:
+            raise ValueError('Audio source changed during reading')
+        if len(data) > max_bytes or len(data) != int(record['byte_size']):
+            raise ValueError('Recording size differs from reviewed inventory')
+        return data
+    def verify_member(info, prefix):
+        for name, value in _member_fingerprint(info, prefix).items():
+            if record.get(name) != value:
+                raise ValueError('Archive member changed since inventory; regenerate the inventory')
     i, j = int(record["member_index"]), int(record["inner_member_index"])
-    if i < 0:
+    if i == -1 and j == -1:
         if path.stat().st_size > max_bytes:
             raise ValueError("Recording exceeds configured byte limit")
-        return path.read_bytes()
+        with path.open('rb') as stream:
+            return finish(stream.read(max_bytes + 1))
+    if i < 0 or j < -1:
+        raise ValueError('Invalid audio archive locator')
     with zipfile.ZipFile(path) as archive:
+        if i >= len(archive.infolist()):raise ValueError('Audio archive member is unavailable')
         info = archive.infolist()[i]
+        verify_member(info, 'member')
         if j < 0:
             if info.file_size > max_bytes:
                 raise ValueError("Recording exceeds configured byte limit")
-            return archive.read(info)
+            with archive.open(info) as stream:
+                return finish(stream.read(max_bytes + 1))
+        if info.file_size > max_nested_bytes:
+            raise ValueError('Nested archive exceeds configured byte limit')
         with tempfile.SpooledTemporaryFile(max_size=64 * 1024**2) as spool:
             with archive.open(info) as stream:
-                shutil.copyfileobj(stream, spool)
+                _bounded_copy(stream, spool, max_nested_bytes)
             spool.seek(0)
             with zipfile.ZipFile(spool) as inner:
+                if j >= len(inner.infolist()):raise ValueError('Nested audio member is unavailable')
                 child = inner.infolist()[j]
+                verify_member(child, 'child')
                 if child.file_size > max_bytes:
                     raise ValueError("Recording exceeds configured byte limit")
-                return inner.read(child)
+                with inner.open(child) as stream:
+                    return finish(stream.read(max_bytes + 1))
 
 
 def eligibility(record: Mapping, semantic: bool = False) -> tuple[bool, list[str]]:
@@ -265,7 +370,11 @@ def decode_audio(data: bytes, sample_rate: int = 16000, max_seconds: int = 3600)
                         raise ValueError("Recording exceeds duration limit")
                     chunks.append(chunk)
             for converted in resampler.resample(None):
-                chunks.append(converted.to_ndarray().reshape(-1).astype(np.float32))
+                chunk = converted.to_ndarray().reshape(-1).astype(np.float32)
+                total += chunk.size
+                if total > sample_rate * max_seconds:
+                    raise ValueError('Recording exceeds duration limit')
+                chunks.append(chunk)
     except Exception as error:
         raise ValueError(f"Audio decoding failed ({_safe_error(error)})") from None
     if not chunks:
@@ -650,17 +759,25 @@ def process_audio_inventory(inventory_path: str | Path, review_path: str | Path,
     """
     _offline()
     out = _private_dir(output_dir)
-    transcript_dir = _private_dir(out / "transcripts")
-    embedding_dir = _private_dir(out / "embeddings")
+    transcript_dir = _private_dir(_child(out, 'transcripts'))
+    embedding_dir = _private_dir(_child(out, 'embeddings'))
     inventory = pd.read_parquet(inventory_path)
-    reviews = pd.read_csv(review_path, keep_default_na=False) if Path(review_path).suffix.lower() == ".csv" else pd.read_parquet(review_path)
-    if reviews.recording_id.duplicated().any():
-        raise ValueError("Duplicate recording review rows")
+    reviews = pd.read_csv(review_path, keep_default_na=False, dtype={'recording_id':'string'}) if Path(review_path).suffix.lower() == ".csv" else pd.read_parquet(review_path)
+    for table in (inventory, reviews):
+        if 'recording_id' not in table or table.recording_id.isna().any() or not table.recording_id.astype(str).str.fullmatch(r'[0-9a-f]{24}').all():
+            raise ValueError('Inventory and review require opaque recording identifiers')
+        if table.recording_id.duplicated().any():
+            raise ValueError('Duplicate recording inventory or review rows')
+    if not set(reviews.recording_id) <= set(inventory.recording_id):
+        raise ValueError('Recording review does not match the supplied inventory')
+    if 'fingerprint_version' not in inventory or not inventory.fingerprint_version.eq(1).all():
+        raise ValueError('Legacy audio locator lacks fingerprints; regenerate the inventory')
     review_map = reviews.set_index("recording_id").to_dict("index")
     with open(Path(inventory_path).parent / "private_sources.json") as handle:
         sources = json.load(handle)
     wavlm = whisper = klue = None
     processed, deferred = [], []
+    verified_sources = {}
     for row in inventory.to_dict("records"):
         review = review_map.get(row["recording_id"], {})
         for field in (*REVIEW_FIELDS, "recording_date"):
@@ -673,7 +790,7 @@ def process_audio_inventory(inventory_path: str | Path, review_path: str | Path,
         if limit is not None and len(processed) >= limit:
             break
         try:
-            waveform, rate = decode_audio(read_recording_bytes(row, sources))
+            waveform, rate = decode_audio(read_recording_bytes(row, sources, _verified_sources=verified_sources))
             features = handcrafted_audio_features(waveform, rate)
             result = {"recording_id": row["recording_id"], "subject_id": row["subject_id"],
                       "recording_date": pd.to_datetime(row["recording_date"]), "task": row["task"], **features}
@@ -682,21 +799,21 @@ def process_audio_inventory(inventory_path: str | Path, review_path: str | Path,
             if wavlm_dir:
                 wavlm = wavlm or FrozenWavLM(wavlm_dir, device)
                 vector = wavlm.encode(waveform, rate)
-                np.save(_private_file_empty(embedding_dir / f"{row['recording_id']}.wavlm.npy"), vector)
+                np.save(_private_file_empty(_child(embedding_dir, f"{row['recording_id']}.wavlm.npy")), vector)
                 result.update({f"audio__wavlm_{i:04d}": float(v) for i, v in enumerate(vector)})
             if whisper_dir:
                 whisper = whisper or LocalWhisper(whisper_dir, device)
                 transcript = whisper.transcribe(waveform, rate)
-                _json_private(transcript_dir / f"{row['recording_id']}.restricted_asr.json", transcript)
-                _json_private(transcript_dir / f"{row['recording_id']}.review_candidate.json", sanitize_transcript(transcript))
-            reviewed = transcript_dir / f"{row['recording_id']}.reviewed.json"
+                _json_private(_child(transcript_dir, f"{row['recording_id']}.restricted_asr.json"), transcript)
+                _json_private(_child(transcript_dir, f"{row['recording_id']}.review_candidate.json"), sanitize_transcript(transcript))
+            reviewed = _child(transcript_dir, f"{row['recording_id']}.reviewed.json")
             if klue_dir and reviewed.exists():
                 with reviewed.open() as handle:
                     text = semantic_text(row, json.load(handle))
                 if text:
                     klue = klue or FrozenKLUE(klue_dir, device)
                     vector = klue.encode(text)
-                    np.save(_private_file_empty(embedding_dir / f"{row['recording_id']}.klue.npy"), vector)
+                    np.save(_private_file_empty(_child(embedding_dir, f"{row['recording_id']}.klue.npy")), vector)
                     result.update({f"text__klue_{i:04d}": float(v) for i, v in enumerate(vector)})
                     result['semantic_transcript_status'] = 'approved'
             processed.append(result)
@@ -713,15 +830,17 @@ def process_audio_inventory(inventory_path: str | Path, review_path: str | Path,
 
 
 def _private_file_empty(path: Path) -> Path:
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    path = _private_path(path)
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    os.fchmod(fd, 0o600)
     os.close(fd)
     return _private_file(path)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Standalone CLI also callable by the package command dispatcher."""
-    import argparse
-    parser = argparse.ArgumentParser(description="Local-only reviewed speech pipeline")
+    from mindwatch.arguments import PrivateArgumentParser
+    parser = PrivateArgumentParser(description="Local-only reviewed speech pipeline")
     commands = parser.add_subparsers(dest="command", required=True)
     download = commands.add_parser("download-models", help="Public model weights only; no patient inputs")
     download.add_argument("--cache-dir", required=True)

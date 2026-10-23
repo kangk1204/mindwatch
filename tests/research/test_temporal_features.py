@@ -1,3 +1,4 @@
+import os
 """Synthetic tests for past-only temporal summaries and static-tail fitting."""
 import pickle
 from pathlib import Path
@@ -267,7 +268,7 @@ def test_actual_official_mtm_sensor_only_adapter_abstains_without_sensor():
     torch = pytest.importorskip("torch")
     pytest.importorskip("einops")
     pytest.importorskip("timm")
-    public_source = Path(__file__).resolve().parents[1] / ".cache" / "mtm"
+    public_source = Path(os.environ.get("MINDWATCH_MTM_SOURCE", str(Path(__file__).resolve().parents[1] / ".cache" / "mtm")))
     if not (public_source / "mtm" / "mtm.py").is_file():
         pytest.skip("Pinned public MTM code has not been explicitly prepared")
     previous_threads = torch.get_num_threads()

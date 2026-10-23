@@ -1,3 +1,9 @@
+
+# Historical driver: use the validated package entry points for new work.
+if __name__ == "__main__":
+    from utils import retired_legacy_training
+    retired_legacy_training()
+
 import argparse
 import math
 import os
@@ -257,10 +263,7 @@ def build_model_dataframe(
     sensor_medians: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     if sensor_medians is None:
-        sensor_medians = {}
-        for name, df in sensor_frames.items():
-            median_val = df.stack().median()
-            sensor_medians[name] = float(median_val) if pd.notna(median_val) else 0.0
+        raise ValueError("Training-only sensor medians must be provided; cohort-wide imputation is forbidden")
 
     records: List[pd.DataFrame] = []
     for _, row in label_df.iterrows():

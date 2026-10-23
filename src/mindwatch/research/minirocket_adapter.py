@@ -62,15 +62,15 @@ class RocketTransform:
         for t in range(a.shape[1]):
             delta[:,t]=np.where(last>=0,t-last,a.shape[1]+1);last=np.where(mask[:,t],t,last)
         delta=np.log1p(delta)/np.log1p(a.shape[1]+1);delta[:,:,~self.seen]=0
-        return np.ascontiguousarray(np.concatenate([x,mask.astype(np.float32),delta],2).transpose(0,2,1)),mask
+        return np.ascontiguousarray(np.concatenate([x,mask.astype(np.float32),delta],2).transpose(0,2,1), dtype=np.float32),mask
 
     def fit(self,values,groups):
         a=np.asarray(values,np.float32)
-        if a.ndim!=3 or a.shape[1]<9 or len(a)!=len(groups) or np.isinf(a).any():raise ValueError("Real sequences of at least nine time bins required")
+        if a.ndim!=3 or a.shape[1]<9 or a.shape[2]<1 or not len(a) or np.asarray(groups).shape!=(len(a),) or np.isinf(a).any():raise ValueError("Real sequences of at least nine time bins required")
         self.shape=a.shape[1:];w=person_weights(groups)[:,None,None];mask=np.isfinite(a)
         den=(mask*w).sum((0,1));self.seen=den>0
-        self.mean=(np.nan_to_num(a)*w).sum((0,1))/np.maximum(den,1)
-        self.scale=np.sqrt((np.where(mask,(a-self.mean)**2,0)*w).sum((0,1))/np.maximum(den,1));self.scale[self.scale<1e-6]=1
+        self.mean=(np.nan_to_num(a)*w).sum((0,1))/np.maximum(den,1e-12)
+        self.scale=np.sqrt((np.where(mask,(a-self.mean)**2,0)*w).sum((0,1))/np.maximum(den,1e-12));self.scale[self.scale<1e-6]=1
         x,obs=self._inputs(a);good=obs.any((1,2))
         if not good.any():raise ValueError("No observed fitting sequence")
         module=load_source(self.source_dir)
@@ -78,8 +78,10 @@ class RocketTransform:
         @njit
         def initialize():np.random.seed(42)
         initialize();self.state=module.fit(x[good],num_features=self.num_features)
+        self.n_features_out_=int(module.transform(x[good][:1],self.state).shape[1])
         return self
 
     def transform(self,values):
         x,_=self._inputs(values)
+        if not len(x):return np.empty((0,self.n_features_out_),np.float32)
         return load_source(self.source_dir).transform(x,self.state)

@@ -1,3 +1,9 @@
+
+# Historical driver: use the validated package entry points for new work.
+if __name__ == "__main__":
+    from utils import retired_legacy_training
+    retired_legacy_training()
+
 import argparse
 import subprocess
 import sys
@@ -6,10 +12,10 @@ from typing import List
 
 
 def run_command(cmd: List[str]) -> int:
-    print(f"\n===== Running: {' '.join(cmd)} =====\n", flush=True)
+    print("Running tuning subprocess.", flush=True)
     proc = subprocess.run(cmd)
     if proc.returncode != 0:
-        print(f"Command failed with exit code {proc.returncode}: {' '.join(cmd)}", file=sys.stderr)
+        print(f"Tuning subprocess failed with exit code {proc.returncode}.", file=sys.stderr)
     return proc.returncode
 
 

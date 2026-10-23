@@ -12,7 +12,7 @@ def synthetic(rows):
     result = pd.DataFrame(rows, columns=["subject_id", "index_date", "label_available_at"])
     result["index_date"] = pd.to_datetime(result.index_date, format="mixed")
     result["label_available_at"] = pd.to_datetime(result.label_available_at, format="mixed")
-    result["prediction_time"] = result.index_date - pd.Timedelta(days=1)
+    result["prediction_time"] = result.index_date
     result["sample_id"] = [f"synthetic-{i}" for i in range(len(result))]
     result["partition"] = "development"
     result["outcome_unused"] = np.arange(len(result)) % 2
@@ -100,6 +100,7 @@ def test_safety_rejects_row_overlap_strict_index_gap_and_strict_label_gap():
     dates.iloc[0, dates.columns.get_loc("label_available_at")] = pd.Timestamp("2025-09-16")
     assert assert_monitoring_safety(dates, [0], [1])["status"] == "ok"
     dates.iloc[0, dates.columns.get_loc("index_date")] = pd.Timestamp("2025-09-17")
+    dates.iloc[0, dates.columns.get_loc("prediction_time")] = pd.Timestamp("2025-09-17")
     dates.iloc[0, dates.columns.get_loc("label_available_at")] = pd.Timestamp("2025-09-17")
     with pytest.raises(ValueError, match="gap"):
         assert_monitoring_safety(dates, [0], [1])

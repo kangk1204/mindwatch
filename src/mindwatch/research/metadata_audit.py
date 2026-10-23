@@ -16,14 +16,15 @@ def csv_layout(first_row,known_subject_ids=()):
 
 def timestamp_grid(values):
     raw=pd.Series(values).astype('string')
-    extracted=raw.str.extract(r'((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}(?:[ T]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?)',expand=False)
-    extracted=extracted.str.replace('/','-',regex=False).str.replace('.','-',regex=False)
+    parts=raw.str.strip().str.extract(r'^((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})(?:[ T](\d{1,2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?))?\s*(Z|[+-]\d{2}:?\d{2})?$')
+    date=parts[0].str.replace('/','-',regex=False).str.replace('.','-',regex=False)
+    extracted=date+' '+parts[1].fillna('00:00:00')
     # Retain wall-clock timestamps for structural export cadence; never silently
     # turn a mixed UTC/local export into a claimed verified recording date.
     dt=pd.to_datetime(extracted,format='mixed',errors='coerce')
     unique=dt.dropna().drop_duplicates().sort_values()
     delta=unique.diff().dropna().dt.total_seconds()
-    offsets=raw.str.extract(r'(Z|[+-]\d{2}:?\d{2})\s*$',expand=False)
+    offsets=parts[2]
     offset_n=int(offsets.nunique(dropna=True))
     return {'rows':len(raw),'valid_timestamps':int(dt.notna().sum()),'unique_timestamps':len(unique),
         'duplicate_timestamps':int(dt.notna().sum()-len(unique)),

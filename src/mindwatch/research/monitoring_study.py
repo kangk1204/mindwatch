@@ -302,15 +302,24 @@ def _persist(data, cal, valid, target, task):
     value = design['tabular'][:,pos]
     if task == 'regression':
         return pd.DataFrame({'score':value[valid], 'used_modalities':'A', 'fallback_reason':'persistence', 'model_version':'persistence_v6'})
-    y = data.frame[target].to_numpy(dtype=float)
-    keep = np.isfinite(y[cal]) & np.isfinite(value[cal])
-    ci = np.asarray(cal)[keep]
+    cal, valid = np.asarray(cal, dtype=int), np.asarray(valid, dtype=int)
+    # Calibration alone may supply outcomes. Evaluation labels are never read,
+    # including when the caller supplies unlabelled prediction queries.
+    y = pd.to_numeric(data.frame.iloc[cal][target], errors='coerce').to_numpy(dtype=float)
+    if np.isinf(y).any() or np.any(np.isfinite(y) & ~np.isin(y, [0, 1])):
+        raise ValueError('Persistence calibration needs binary labels')
+    keep = np.isfinite(y) & np.isfinite(value[cal])
+    ci, cy = cal[keep], y[keep]
+    groups = data.frame.iloc[ci].subject_id.to_numpy()
     threshold = None
-    if all(np.sum(y[ci] == c) >= 10 for c in (0,1)):
-        model = LogisticRegression(C=1e6, max_iter=1000).fit(value[ci,None], y[ci], sample_weight=participant_weights(data.frame.iloc[ci].subject_id))
-        pp = model.predict_proba(value[valid,None])[:,1]
+    if all(pd.Series(groups[cy == c]).nunique() >= 10 for c in (0,1)):
+        model = LogisticRegression(C=1e6, max_iter=1000).fit(value[ci,None], cy, sample_weight=participant_weights(groups))
+        pp = np.full(len(valid), np.nan)
+        present = np.isfinite(value[valid])
+        if present.any():
+            pp[present] = model.predict_proba(value[valid[present],None])[:,1]
         cp = model.predict_proba(value[ci,None])[:,1]
-        threshold = select_sensitivity_threshold(y[ci], cp, data.frame.iloc[ci].subject_id)['threshold']
+        threshold = select_sensitivity_threshold(cy, cp, groups)['threshold']
         state = 'calibrated_persistence'
     else:
         pp = np.full(len(valid), np.nan)
@@ -571,7 +580,10 @@ def _prognosis(data,output,config,report):
                         if task=='classification':
                             cr=cal if branch=='A' else cal[pf.iloc[cal].sensor_available.to_numpy(bool)]
                             cy=pf.iloc[cr][target].to_numpy(float)
-                            if not all(np.sum(cy==v)>=10 for v in (0,1)):
+                            cal_groups=pf.iloc[cr].subject_id.to_numpy()
+                            cal_people={str(v):int(pd.Series(cal_groups[cy==v]).nunique()) for v in (0,1)}
+                            record['calibration_class_participants']=cal_people
+                            if not all(cal_people[str(v)]>=10 for v in (0,1)):
                                 record['status']='insufficient_calibration_support';records.append(record);continue
                             cp=predict_base(base,source,branch,cr,task=task)
                             calibrator=LogisticRegression(C=1e6,max_iter=1000).fit(logit(np.clip(cp,1e-7,1-1e-7))[:,None],cy,sample_weight=participant_weights(pf.iloc[cr].subject_id))
