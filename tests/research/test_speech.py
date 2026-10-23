@@ -115,6 +115,7 @@ def test_missing_subject_and_semantic_review_are_fail_closed():
 
 
 def test_pyav_decodes_mono16k_preserving_duration():
+    pytest.importorskip("av")
     audio, rate = decode_audio(synthetic_wave(stereo=True))
     assert rate == 16000 and audio.ndim == 1
     assert abs(len(audio)/rate-1.0) < .005
