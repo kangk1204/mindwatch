@@ -4,11 +4,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from mindwatch.arguments import PrivateArgumentParser
 
 
 def main(argv=None):
     os.umask(0o077)
-    p = argparse.ArgumentParser(description='Confidential local multimodal research. Safe aggregate output only.')
+    p = PrivateArgumentParser(description='Confidential local multimodal research. Safe aggregate output only.')
     sub = p.add_subparsers(dest='command', required=True)
     q = sub.add_parser('prepare')
     q.add_argument('--original', type=Path, default=Path('../02_original'))

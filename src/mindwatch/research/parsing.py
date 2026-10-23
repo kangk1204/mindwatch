@@ -10,20 +10,21 @@ def robust_numeric(s):
 
 def robust_clock(s):
     ss=s.astype('string').str.strip()
-    p=ss.str.extract(r'(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?')
-    h=pd.to_numeric(p[0],errors='coerce');mi=pd.to_numeric(p[1],errors='coerce');se=pd.to_numeric(p[2],errors='coerce').fillna(0)
-    am=ss.str.contains(r'(?i)(?:\bAM\b|오전)',regex=True,na=False);pm=ss.str.contains(r'(?i)(?:\bPM\b|오후)',regex=True,na=False)
+    # Match the complete field. Both '12:30AM' and Korean markers are explicit;
+    # embedded digits, contradictory markers and arbitrary suffixes are invalid.
+    p=ss.str.extract(r'(?i)^(?:(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}[ T])?(?:(AM|PM|오전|오후)\s*)?(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?\s*(AM|PM|오전|오후)?$')
+    h=pd.to_numeric(p[1],errors='coerce');mi=pd.to_numeric(p[2],errors='coerce');se=pd.to_numeric(p[3],errors='coerce').fillna(0)
+    marker=p[0].fillna(p[4]).str.upper()
+    am=marker.isin(['AM','오전']);pm=marker.isin(['PM','오후'])
     marked=am|pm;valid=(~marked & h.between(0,23))|(marked & h.between(1,12))
+    valid &= ~(p[0].notna() & p[4].notna())
     h=h.where(~marked,(h%12)+12*pm.astype(int))
     value=h+mi/60+se/3600
     return value.where(valid&mi.between(0,59)&se.between(0,59.999999)).to_numpy(dtype=float,na_value=np.nan)
 
 def robust_dates(s):
-    # No implicit UTC/KST conversion. Explicit offsets are audited separately.
-    result=date_series(s)
-    compact=s.astype('string').str.extract(r'^((?:19|20)\d{6})(?:$|[ T])',expand=False)
-    other=pd.to_datetime(compact,format='%Y%m%d',errors='coerce')
-    return result.fillna(other)
+    # One parser contract; never re-accept a partial field rejected upstream.
+    return date_series(s)
 
 def canonical(records):
     a=pd.concat(records,ignore_index=True);keys=['subject_id','date','modality']

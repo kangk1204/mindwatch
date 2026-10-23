@@ -79,34 +79,21 @@ def _directory(path: Path) -> None:
 
 
 def _json(path: Path, data: Any) -> None:
-    from mindwatch.pipeline import private_output
-    path = private_output(path)
-    # Atomic replacement avoids partially written selection/checkpoint metadata.
-    temporary = path.with_name(path.name + ".tmp")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=False, indent=2, allow_nan=False, default=str)
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    from .privacy import atomic_private_path
+    with atomic_private_path(path) as temporary:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2, allow_nan=False, default=str)
 
 
 def _parquet(path: Path, frame: pd.DataFrame) -> None:
-    from mindwatch.pipeline import private_output
-    path = private_output(path)
-    # Create privately before a library opens the path (rather than chmod later).
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.close(descriptor)
-    frame.to_parquet(path, index=False)
-    path.chmod(0o600)
+    from .privacy import write_parquet
+    write_parquet(path, frame)
 
 
 def _checkpoint(path: Path, model: Any) -> str:
-    from mindwatch.pipeline import private_output
-    path = private_output(path)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.close(descriptor)
-    joblib.dump(model, path)
-    path.chmod(0o600)
+    from .privacy import write_joblib
+    path = Path(path)
+    write_joblib(path, model)
     return sha256(path.read_bytes()).hexdigest()
 
 
@@ -288,6 +275,14 @@ def model_status(model: str, config: BenchmarkConfig) -> dict[str, Any]:
     return {"status": "available", "dependency": "scikit-learn", "version": importlib.metadata.version("scikit-learn")}
 
 
+def _logistic_regularization(ratio):
+    """Keep the same penalty across sklearn's pre/post-1.8 APIs."""
+    penalty = inspect.signature(LogisticRegression).parameters.get("penalty")
+    if penalty is not None and penalty.default == "l2":
+        return {"penalty": "elasticnet", "l1_ratio": ratio} if ratio > 0 else {"penalty": "l2"}
+    return {"l1_ratio": ratio}
+
+
 def _estimator(model: str, params: dict, seed: int, config: BenchmarkConfig):
     if model in {"grud", "tcn"}:
         from .neural import SensorNeuralClassifier
@@ -298,8 +293,11 @@ def _estimator(model: str, params: dict, seed: int, config: BenchmarkConfig):
     if model == "prevalence":
         classifier = DummyClassifier(strategy="prior")
     elif model in {"elasticnet", "demographic", "missingness"}:
-        # scikit-learn >=1.8 specifies regularization through l1_ratio.
-        classifier = LogisticRegression(solver="saga" if model == "elasticnet" else "lbfgs", l1_ratio=params.get("l1_ratio", 0.0), C=params.get("C", 1.0), max_iter=3000, random_state=seed)
+        # Explicit penalty also preserves the declared model on sklearn <1.8,
+        # where an l1_ratio alone is ignored under the default L2 penalty.
+        ratio = params.get("l1_ratio", 0.0)
+        classifier = LogisticRegression(solver="saga" if model == "elasticnet" else "lbfgs",
+            **_logistic_regularization(ratio), C=params.get("C", 1.0), max_iter=3000, random_state=seed)
     elif model == "catboost":
         from catboost import CatBoostClassifier
         classifier = CatBoostClassifier(iterations=300, learning_rate=0.05, loss_function="Logloss", random_seed=seed, thread_count=1, verbose=False, allow_writing_files=False, **params)

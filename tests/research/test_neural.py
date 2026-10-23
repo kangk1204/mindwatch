@@ -1,3 +1,4 @@
+import os
 import pytest
 pytest.importorskip("torch")
 """Synthetic software checks. They establish no clinical performance."""
@@ -121,7 +122,7 @@ def test_official_mtm_unseen_channel_changes_are_ignored_after_shared_prepare():
     pytest.importorskip("einops")
     pytest.importorskip("timm")
     from mindwatch.research.mtm_adapter import _OfficialMTMNetwork
-    source = Path(__file__).resolve().parents[1] / ".cache" / "mtm"
+    source = Path(os.environ.get("MINDWATCH_MTM_SOURCE", str(Path(__file__).resolve().parents[1] / ".cache" / "mtm")))
     if not (source / "mtm" / "mtm.py").is_file():
         pytest.skip("Pinned public MTM source has not been explicitly prepared")
     torch.manual_seed(17)

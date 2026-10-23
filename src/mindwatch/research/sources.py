@@ -43,12 +43,17 @@ def decoded_name(info: zipfile.ZipInfo) -> str:
 
 
 def date_series(s: pd.Series) -> pd.Series:
-    # Preserve local calendar dates; no unsupported timezone conversion.
-    d = s.astype(str).str.extract(r'((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})', expand=False)
-    d = d.str.replace('/', '-', regex=False).str.replace('.', '-', regex=False)
-    parsed = pd.to_datetime(d, errors='coerce', format='mixed').dt.normalize()
-    compact = s.astype('string').str.extract(r'^((?:19|20)\d{6})(?:$|[ T])', expand=False)
-    return parsed.fillna(pd.to_datetime(compact, format='%Y%m%d', errors='coerce'))
+    # A complete local calendar field is required. Explicit offsets need prior
+    # source-specific resolution; partial dates and trailing text are invalid.
+    raw = s.astype('string').str.strip()
+    clock = r'(?:[01]?\d|2[0-3])[:-][0-5]\d(?:[:-][0-5]\d(?:\.\d{1,9})?)?'
+    parts = raw.str.extract(r'^((?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2})(?:[ T]('+clock+r'))?$')
+    dates = parts[0].str.replace('/', '-', regex=False).str.replace('.', '-', regex=False)
+    times = parts[1].fillna('00:00:00').str.replace('-', ':', regex=False)
+    parsed = pd.to_datetime(dates+' '+times, errors='coerce', format='mixed').dt.normalize()
+    compact = raw.str.extract(r'^((?:19|20)\d{6})(?:[ T]('+clock+r'))?$')
+    compact_dates = pd.to_datetime(compact[0], format='%Y%m%d', errors='coerce')
+    return parsed.fillna(compact_dates)
 
 
 @dataclass(frozen=True)

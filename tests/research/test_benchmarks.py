@@ -1,3 +1,4 @@
+import os
 import pytest
 pytest.importorskip("torch")
 """Synthetic grouped-validation and frozen-test tests, not biomedical evidence."""
@@ -194,7 +195,7 @@ def test_neural_through_nested_engine_and_packed_empty_window(tmp_path, architec
 def test_official_mtm_through_nested_engine_when_public_source_is_cached(tmp_path):
     pytest.importorskip("torch")
     from mindwatch.research.neural import flatten_sequence
-    source = Path(__file__).resolve().parents[1] / ".cache" / "mtm"
+    source = Path(os.environ.get("MINDWATCH_MTM_SOURCE", str(Path(__file__).resolve().parents[1] / ".cache" / "mtm")))
     config = BenchmarkConfig(models=("mtm",), outer_folds=2, inner_folds=2, calibration_fraction=0.25, sequence_length=4, neural_epochs=1, n_demographics=1, mtm_source_dir=str(source), parameter_grids={"mtm": [{"hidden_dim": 8, "dropout": 0.0}]})
     if model_status("mtm", config)["status"] != "available":
         pytest.skip("Pinned official public MTM source/dependencies are not cached.")

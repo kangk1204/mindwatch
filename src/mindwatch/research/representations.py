@@ -5,6 +5,16 @@ import torch
 from torch import nn
 from mindwatch.models import person_weights
 
+def validate_schedule(epochs, seeds):
+    if seeds is None:
+        raise ValueError("Explicit fixed seeds required")
+    seeds = tuple(seeds)
+    if (not isinstance(epochs, (int, np.integer)) or isinstance(epochs, bool) or epochs < 1 or not seeds or
+            any(not isinstance(seed, (int, np.integer)) or isinstance(seed, bool) or seed < 0 for seed in seeds) or
+            len(set(seeds)) != len(seeds)):
+        raise ValueError("Positive integer epochs and distinct nonnegative integer seeds required")
+    return seeds
+
 def gaps(mask):
  n,t,f=mask.shape;d=np.zeros(mask.shape,np.float32);last=np.full((n,f),-1)
  for k in range(t):d[:,k]=np.where(last>=0,k-last,t+1);last=np.where(mask[:,k],k,last)
@@ -56,14 +66,15 @@ def fit_representation(values,ids,kind="ssl",source_dir=None,epochs=40,seeds=(42
     if kind=="minirocket":
         from .minirocket_adapter import RocketTransform
         return RocketTransform(source_dir).fit(values,ids)
-    if kind not in ("ssl","random") or epochs<1 or not seeds:raise ValueError("Unknown representation or training schedule")
+    if kind not in ("ssl","random"):raise ValueError("Unknown representation")
+    seeds=validate_schedule(epochs,seeds)
     a=np.asarray(values,np.float32);ids=np.asarray(ids)
-    if a.ndim!=3 or a.shape[0]!=len(ids) or not len(a) or np.isinf(a).any():raise ValueError("Aligned finite-or-missing training windows required")
+    if a.ndim!=3 or ids.ndim!=1 or a.shape[0]!=len(ids) or not len(a) or min(a.shape[1:])<1 or np.isinf(a).any():raise ValueError("Aligned finite-or-missing training windows required")
     patch=24 if a.shape[1]>=336 else 1
     if a.shape[1]%patch:raise ValueError("Sequence length must be divisible by patch length")
     obs=np.isfinite(a);w=person_weights(ids)[:,None,None];den=(obs*w).sum((0,1))
-    mean=(np.nan_to_num(a)*w).sum((0,1))/np.maximum(den,1)
-    scale=np.sqrt((np.where(obs,(a-mean)**2,0)*w).sum((0,1))/np.maximum(den,1));scale[scale<1e-6]=1
+    mean=(np.nan_to_num(a)*w).sum((0,1))/np.maximum(den,1e-12)
+    scale=np.sqrt((np.where(obs,(a-mean)**2,0)*w).sum((0,1))/np.maximum(den,1e-12));scale[scale<1e-6]=1
     rep=MaskedRepresentation(den>0,mean,scale,[],patch,a.shape[1:],[]);z,observed=rep.inputs(a)
     valid=observed.any((1,2));groups=[np.flatnonzero((ids==sid)&valid) for sid in np.unique(ids[valid])]
     if not groups:raise ValueError("No observed fitting sequence")

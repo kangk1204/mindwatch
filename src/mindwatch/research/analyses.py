@@ -19,7 +19,7 @@ from sklearn.linear_model import ElasticNet, LogisticRegression, Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .benchmarks import participant_calibration_split
+from .benchmarks import _logistic_regularization, participant_calibration_split
 from .evaluation import binary_metrics, holm_adjust, paired_cluster_bootstrap, participant_weights, select_sensitivity_threshold
 from .privacy import write_json, write_parquet
 
@@ -204,7 +204,7 @@ def run_geography_validation(frame: pd.DataFrame, feature_columns: Sequence[str]
         X = data[list(feature_columns)].to_numpy(dtype=float)
         X = np.where(np.isfinite(X), X, np.nan)
         model = make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler(),
-                              LogisticRegression(solver="saga", l1_ratio=.5, C=.1, max_iter=3000, random_state=seed))
+                              LogisticRegression(solver="saga", **_logistic_regularization(.5), C=.1, max_iter=3000, random_state=seed))
         try:
             model.fit(X[fit], y[fit], logisticregression__sample_weight=participant_weights(data.iloc[fit].subject_id))
             raw_cal = model.predict_proba(X[calibration])[:, 1]

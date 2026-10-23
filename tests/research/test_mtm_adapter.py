@@ -1,3 +1,4 @@
+import os
 import pytest
 pytest.importorskip("torch")
 """Exact-source MTM software checks; cached public code, never cohort data."""
@@ -19,7 +20,7 @@ from mindwatch.research.neural import flatten_sequence, past_only_delta
 
 @pytest.fixture
 def official_source():
-    root = Path(__file__).resolve().parents[1] / ".cache" / "mtm"
+    root = Path(os.environ.get("MINDWATCH_MTM_SOURCE", str(Path(__file__).resolve().parents[1] / ".cache" / "mtm")))
     if not (root / "mtm" / "mtm.py").exists():
         pytest.skip("Prepare pinned public MTM source explicitly before integration tests")
     return root

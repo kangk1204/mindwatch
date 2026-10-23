@@ -464,11 +464,13 @@ def fit_monitoring_bundle(data, fit_rows, cal_rows, selection, config,
             ycal = _targets(frame, branch_cal, target_column, task)
             keep = np.isfinite(raw)
             counts = {str(label): int((ycal[keep] == label).sum()) for label in (0, 1)}
+            groups = frame.iloc[branch_cal[keep]].subject_id.to_numpy()
+            people = {str(label): int(pd.Series(groups[ycal[keep] == label]).nunique()) for label in (0, 1)}
             status["calibration_class_counts"] = counts
+            status["calibration_class_participants"] = people
             status["n_calibration_predicted"] = int(keep.sum())
-            if all(counts[str(label)] >= 10 for label in (0, 1)):
+            if all(people[str(label)] >= 10 for label in (0, 1)):
                 try:
-                    groups = frame.iloc[branch_cal[keep]].subject_id.to_numpy()
                     fitted.calibrator = _calibrator(ycal[keep], raw[keep], groups)
                     calibrated = _calibrated(fitted.calibrator, raw[keep])
                     operating = select_sensitivity_threshold(ycal[keep], calibrated, groups,

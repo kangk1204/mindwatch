@@ -7,6 +7,7 @@ import math
 import os
 import secrets
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -38,36 +39,45 @@ def clean_json(obj):
     return obj
 
 
-def write_json(path: Path, obj) -> None:
+@contextmanager
+def atomic_private_path(path: Path, suffix: str = ''):
+    """Create private bytes first; replace only after a successful complete write."""
     path = Path(path)
+    if path.is_symlink():
+        raise ValueError('artifact_symlink_not_allowed')
     secure_dir(path.parent)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.write-')
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.write-', suffix=suffix)
+    os.close(fd)
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(clean_json(obj), f, ensure_ascii=False, indent=2, allow_nan=False)
+        yield Path(tmp)
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def write_json(path: Path, obj) -> None:
+    with atomic_private_path(path) as tmp:
+        with tmp.open('w', encoding='utf-8') as f:
+            json.dump(clean_json(obj), f, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 def write_parquet(path: Path, frame: pd.DataFrame) -> None:
-    path = Path(path)
-    secure_dir(path.parent)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix='.parquet')
-    os.close(fd)
-    try:
+    with atomic_private_path(path, '.parquet') as tmp:
         frame.to_parquet(tmp, index=False)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+
+
+def write_joblib(path: Path, model) -> None:
+    import joblib
+    with atomic_private_path(path, '.joblib') as tmp:
+        joblib.dump(model, tmp)
 
 
 def get_key(private_dir: Path) -> bytes:
     path = secure_dir(private_dir) / 'identity.key'
+    if path.is_symlink():
+        raise ValueError('identity_key_symlink_not_allowed')
     if not path.exists():
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

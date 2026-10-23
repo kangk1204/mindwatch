@@ -159,6 +159,9 @@ here. MiniRocket setup is available through
 `mindwatch.research.minirocket_adapter.prepare_source`. Chronos-2 and Timestral
 wrappers accept already prepared local model directories. Their weights and
 optional runtime packages are not included, and fitting does not download them.
+To run MTM integration tests against an already verified external checkout, set
+`MINDWATCH_MTM_SOURCE` to its directory before running pytest. Tests do not fetch
+upstream source or weights automatically.
 
 The `routing` and `registry` APIs replace study-specific interfaces tied to
 private fitted models and participant lists. Create a new private registry from
@@ -174,12 +177,27 @@ must be supplied explicitly. It remains separate from the H/compact workflow.
 ## Older scripts and contributions
 
 Earlier sensor, voice, tabular and TFT scripts remain in `src/`. Their optional
-dependencies are listed in `requirements.txt`. They are separate from the
-longitudinal package described above and have not been revalidated by its tests.
+dependencies are listed in `requirements.txt`. Their training entry points now
+stop before loading inputs. The audit found cohort-wide imputation and model
+selection paths that do not satisfy the current validation rules. Their source
+is retained for reference, not for new training or performance claims. Use
+`mindwatch-longitudinal` or the explicitly configured research tools instead.
 The H and compact classifiers do not use sensor or voice inputs.
 
 Run older scripts from a private working directory. Set `MINDWATCH_CONFIG` to a
-private YAML file; the filenames in `config.yaml` are placeholders.
+private YAML file; the filenames in `config.yaml` are placeholders. This applies
+to the remaining descriptive helpers, not to the retired training commands.
+
+New runs reject malformed dates, non-binary classification targets and invalid
+training schedules. Calibration requires distinct participants in both classes.
+Unsupervised EMA output heads fall back to the supplied baseline. Hourly input
+must contain valid local timestamps without a timezone suffix; no conversion is
+guessed. Speech inventories include source fingerprints and must be rebuilt if
+the source archives change.
+
+Model registries record a source fingerprint. A code update requires a new
+training/freeze run; keep older models with their matching code version. The
+software checks do not replace re-evaluation on a study's locked data.
 
 Before committing, run `python tools/check_code_only.py --staged` and review the
 diff. Git hooks and CI reject files outside the code allowlist, including data,

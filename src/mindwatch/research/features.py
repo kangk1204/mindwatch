@@ -1,6 +1,8 @@
 """Past-only daily windows. No synthetic minute-resolution actigraphy."""
 from __future__ import annotations
 from collections import Counter
+import csv
+import io
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -29,7 +31,12 @@ def aggregate_daily(sources, raw_mapping, registry=None, exploratory=True):
             continue
         before = (source.path.stat().st_size, source.path.stat().st_mtime_ns)
         with source.open() as f:
-            header = pd.read_csv(f, nrows=0).columns.tolist()
+            header = next(csv.reader(io.TextIOWrapper(f, encoding='utf-8-sig'), strict=True), [])
+        # pandas mangles repeated column names before exposing .columns, which
+        # would silently hide a second export column for the same participant.
+        normalized_header = [normalized(col) for col in header]
+        if len(header) < 2 or any(not col for col in normalized_header) or len(set(normalized_header)) != len(header):
+            raise ValueError('duplicate_or_empty_source_headers_need_resolution')
         idcols = {col: raw_mapping[normalized(col)] for col in header[1:] if normalized(col) in raw_mapping}
         if not idcols:
             continue
