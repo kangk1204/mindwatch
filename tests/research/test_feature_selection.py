@@ -34,14 +34,28 @@ def test_explicit_full_recipe_reproduces_default(synthetic, index):
 
 
 @pytest.mark.parametrize('index', [1, 3])
-def test_deleted_group_has_no_prediction_effect(synthetic, index, tmp_path):
+def test_deleted_group_has_no_prediction_effect(synthetic, index, tmp_path, monkeypatch):
     x, y, meta = synthetic
     recipe = collection_pattern_recipes()[index]
     model = recipe.fit(x, y, meta.subject_id)
     changed = x.copy()
     for c in set(FEATURE_COLUMNS)-set(recipe.columns):
         changed[c] = 1e6
-    np.testing.assert_array_equal(model.predict(x), model.predict(changed))
+    estimator_inputs = []
+    predict_proba = model.estimator.predict_proba
+
+    def capture(estimator, values):
+        assert estimator is model.estimator
+        estimator_inputs.append(values.copy())
+        return predict_proba(values)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(model.estimator), 'predict_proba', capture)
+        before, after = model.predict(x), model.predict(changed)
+    # Require exactly identical estimator inputs. BLAS may round identical
+    # values differently when their arrays have different memory layouts.
+    np.testing.assert_array_equal(*estimator_inputs)
+    np.testing.assert_allclose(before, after, rtol=0, atol=1e-14)
     joblib.dump(model, tmp_path/'synthetic.joblib')
     restored = joblib.load(tmp_path/'synthetic.joblib')
     np.testing.assert_array_equal(restored.predict(x), model.predict(x))

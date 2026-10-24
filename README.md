@@ -20,17 +20,28 @@ Recent EMA can include responses up to the day before reassessment. The interval
 between questionnaires therefore does not define how far in advance the model
 makes its prediction.
 
-People enter this task when their first observed PHQ-9 is at least 5. The first
-assessment provides history; it is not a prediction target. People stay in the
-study if their symptoms later improve.
+The first assessment provides history; it is not a prediction target. Cohort
+entry rules belong in the study protocol. The original training CLI below uses
+an initial PHQ-9 threshold of 5 and retains people whose symptoms later improve.
+The lightweight inference API does not impose that entry threshold: it accepts
+any valid earlier PHQ-9 score, including zero.
 
 | Model | Information used |
 | --- | --- |
 | **H** | Earlier PHQ-9, GAD-7 and ISI scores, and time between assessments |
 | **compact** | Previous PHQ-9 and recent EMA values for depression, anxiety, sleep and stress |
+| **MindWatch lightweight** | Previous PHQ-9 plus the last and median EMA value in each of the four domains; nine inputs in total |
 
-Both use regularized logistic regression. The compact model compares EMA
-lookbacks of 14, 30, 60 and 90 days.
+H and compact use regularized logistic regression. The original compact
+comparison includes EMA lookbacks of 14, 30, 60 and 90 days. The lightweight
+interface uses a fixed 14-day EMA window and omits response-age, collection-count
+and collection-interval features. It supports frozen logistic classification and
+a separate linear change-score head. The estimated change is added to the
+previous PHQ-9 and restricted to the questionnaire's 0–27 range.
+
+Known and new users can use the same frozen lightweight model. Exposure to
+training or calibration is tracked separately; it does not itself establish how
+well the model will perform for a new user. No fitted model is bundled here.
 
 There is also a separate EMA baseline function, `ema_forecasts`. It predicts the
 next recorded EMA using either the previous response or a fixed smoothing rule
@@ -70,6 +81,36 @@ The code does not guess timezone conversions or sensor units.
 Use NaN for missing scores, not zero. PHQ-9, GAD-7 and ISI must be valid integer
 totals; EMA must already use a consistent 0–10 scale. Missing EMA fields remain
 missing. Responses are not interpolated.
+
+## Use a frozen lightweight model
+
+`mindwatch.lightweight` separates inference from training. `NumericHead` holds
+the preprocessing arrays and coefficients from your own development-fitted
+model. `FrozenLightweight` combines the classifier, change-score regressor and
+calibration settings. Save it with `save_release` to a new private directory
+outside Git, then load it for inference:
+
+```python
+import os
+from mindwatch.lightweight import load_release
+
+model = load_release(os.environ["PRIVATE_MODEL"])
+predictions = model.predict_from_history(queries, survey_history, ema_history)
+```
+
+Here `queries` has `sample_id`, `subject_id` and `index_date`; it must not contain
+current outcome scores. `survey_history` needs `subject_id`, `index_date` and
+`phq9`. `ema_history` uses the daily EMA schema above. The feature builder excludes
+the entire query day, even if the query includes a clock time. It uses the most
+recent valid earlier PHQ-9 and actual EMA observations in the preceding 14 days.
+
+The output includes probability, estimated PHQ-9 total and change, the supplied
+threshold, available inputs and population exposure. Without prior PHQ-9 it
+returns `insufficient_data`. Without EMA it uses the same model's frozen training
+imputation and marks this explicitly. It does not switch to a different H model.
+Keep predictions and releases private; releases contain fitted arrays and
+participant membership. Loading verifies file and runtime hashes and never
+retrains a model. Preserve an older release with its matching source version.
 
 ## Train first, then evaluate
 
@@ -136,6 +177,8 @@ implementations and tests, without the private study files they were used with.
 | Models | `neural` (GRU-D, TCN and gated fusion), `mtm_adapter`, `sensor_models`, `neural_comparators`, `representations`, `stacking` |
 | Weekly EMA | `ema_personalization`, `ema_sequence`, `ema_joint`, `foundation` |
 | Frozen inference | `routing`, `registry` |
+| Causal EMA history | `state_model`, `history_decay` |
+| Small prediction heads | `state_heads` |
 | Robustness and summaries | `controls`, `missingness_stress`, `analyses`, `associations`, `monitoring_report` |
 
 `feature_selection` compares full H/compact recipes with versions that remove
@@ -151,6 +194,16 @@ caller-specified fallback. Freeze that choice before evaluating later data.
 The two-fold selection rule is a heuristic and can be unstable in small samples;
 selection scores are not independent test performance. No study-specific winner,
 cohort split, performance result or fitted checkpoint is included here.
+
+`state_model` fits pooled or personalized continuous-time EMA dynamics using
+only explicitly allowed training people and dates. It filters each person's
+earlier responses forward; it does not smooth backward through future responses.
+`history_decay` provides a simpler comparison using earlier EMA means and
+time-decayed values. Its joint selection helper compares development AUROC,
+Brier and total-score MAE before preferring fewer inputs. `state_heads` supplies
+small regularized classification and change-score heads with training-only
+preprocessing. These are reusable methods, not evidence that any one method
+improves performance in a particular cohort.
 
 Install the parts you need:
 
