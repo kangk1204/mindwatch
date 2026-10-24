@@ -127,6 +127,7 @@ def test_cli_finalization_gates_before_loader_and_dispatches_sequence(monkeypatc
     monkeypatch.setattr(pipeline, "load_model_frame", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Tabular loader must not run")))
     missing = tmp_path / "missing"
     assert main(["finalize", "--dataset", str(tmp_path), "--model-dir", str(missing)]) == 1
+    assert json.loads(capsys.readouterr().err)['error_type']=='ValueError'
     selected = tmp_path / "sequence_model"
     write_json(selected / "selection.json", {"sealed_selection": True, "target_column": "y_phq9", "feature_columns": ["sensor__seq_0000"], "config": {"sequence_length": 7}})
     def sequence_loader(dataset, window, target, phase):
@@ -136,3 +137,18 @@ def test_cli_finalization_gates_before_loader_and_dispatches_sequence(monkeypatc
     monkeypatch.setattr(benchmarks, "finalize", lambda frame, output: {"status": "synthetic_test_only"})
     assert main(["finalize", "--dataset", str(tmp_path), "--model-dir", str(selected)]) == 0
     assert called == [(7, "y_phq9", "finalize")]
+
+
+def test_cli_unsealed_selection_is_blocked_before_any_loader(monkeypatch,tmp_path,capsys):
+    from mindwatch.research import pipeline
+    called=[]
+    def forbidden_loader(*args,**kwargs):
+        called.append(True)
+        raise AssertionError('A later loader error is not proof of a freeze gate')
+    monkeypatch.setattr(pipeline,'load_model_frame',forbidden_loader)
+    selected=tmp_path/'unsealed'
+    write_json(selected/'selection.json',{'sealed_selection':False,'target_column':'y_phq9',
+                                          'feature_columns':['sensor__steps'],'config':{}})
+    assert main(['finalize','--dataset',str(tmp_path),'--model-dir',str(selected)])==1
+    assert called==[]
+    assert json.loads(capsys.readouterr().err)['error_type']=='ValueError'

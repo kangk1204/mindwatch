@@ -67,7 +67,8 @@ class Head:
         return self.estimator.predict_proba(a)[:, 1]
 
 
-def fit_head(x: pd.DataFrame, y, ids, recipe: str) -> Head:
+def fit_head(x: pd.DataFrame, y, ids, recipe: str, *, columns=None) -> Head:
+    """Refit a complete or explicitly reduced recipe using training data only."""
     validate_x(x)
     y = np.asarray(y, float)
     if len(x) != len(y) or len(y) != len(ids) or not len(y) or not np.isin(y, [0, 1]).all():
@@ -75,7 +76,15 @@ def fit_head(x: pd.DataFrame, y, ids, recipe: str) -> Head:
     if recipe not in ("H", "compact"):
         raise ValueError("Unknown model recipe")
     weights = person_weights(ids)
-    columns = H_COLUMNS if recipe == "H" else ("h_previous_phq9", *E_COLUMNS)
+    allowed = H_COLUMNS if recipe == "H" else ("h_previous_phq9", *E_COLUMNS)
+    if columns is None:
+        columns = allowed
+    elif (not isinstance(columns, (tuple, list)) or
+          any(not isinstance(c, str) for c in columns) or
+          len(set(columns)) != len(columns) or not set(columns) <= set(allowed)):
+        raise ValueError("Unique columns from the selected recipe are required")
+    else:
+        columns = tuple(c for c in allowed if c in columns)
     if recipe == "compact":
         columns = tuple(c for c in columns if x[c].notna().mean() >= .3 and x[c].nunique() > 1)
     a = x.loc[:, list(columns)].to_numpy(float, copy=True)

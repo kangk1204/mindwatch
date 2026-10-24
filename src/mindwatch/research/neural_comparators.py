@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from . import sensor_models as m
 from .representations import gaps, validate_schedule
+from .sequence_arrays import past_only_delta
 from mindwatch.models import person_weights
 from .neural import GRUDEncoder, MaskAwareTCN
 from .mtm_adapter import load_official_mtm, verify_mtm_source
@@ -75,7 +76,9 @@ class NeuralModel:
             raise ValueError('Sequence length changed after fitting')
         mask = np.isfinite(v) & self.seen[None, None, :]
         z = np.where(mask, (v-self.mean)/self.scale, 0).astype(np.float32)
-        delta = gaps(mask)
+        # Preserve old saved states; newly fitted encoders consume elapsed days.
+        delta = (past_only_delta(mask) if self.spec.get('delta_units') == 'days'
+                 else gaps(mask))
         delta[:, :, ~self.seen] = 0
         if self.task == 'phq':
             a = x[list(self.base.cols)].to_numpy(dtype=float, copy=True)
@@ -163,7 +166,8 @@ def fit(f, x, v, y, task, domain, arch, *, p0_values=None, base_columns=None,
     else:
         sm = ss = np.empty(0)
     result = NeuralModel(task, {'kind': 'neural', 'architecture': arch, 'view': 'daily', 'alpha': .5,
-                               'mtm_source_dir': mtm_source_dir, 'sequence_length': v.shape[1]},
+                               'mtm_source_dir': mtm_source_dir, 'sequence_length': v.shape[1],
+                               'delta_units': 'days'},
                          base, mean, scale, den > 0, sm, ss, [], [])
     arrays = result.arrays(x, v)
     target = y if task == 'phq' else y-p0_values[good]

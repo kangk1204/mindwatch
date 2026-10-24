@@ -6,7 +6,7 @@ from mindwatch.features import DOMAINS
 def event_history(anchors,daily):
  from .contracts import calendar_table
  from mindwatch.features import validate_ema
- anchors=calendar_table(anchors,'index_date');daily=validate_ema(daily)
+ anchors=calendar_table(anchors,'index_date',date_only=True);daily=validate_ema(daily)
  groups={sid:g.sort_values('date') for sid,g in daily.groupby('subject_id')};rows=[]
  for r in anchors.itertuples():
   row={};g=groups.get(r.subject_id)

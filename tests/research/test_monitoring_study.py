@@ -71,12 +71,60 @@ def test_one_se_prefers_simple_without_outer_scores():
 
 def test_outer_outcomes_cannot_change_inner_tuning():
     data=data_fixture()
-    fit=np.arange(60)
+    # Actual expanding folds and multiple candidates, rather than warmup fallback.
+    data.frame=pd.concat([data.frame.iloc[:60].copy() for _ in range(7)],ignore_index=True)
+    data.frame['sample_id']=['synthetic-'+str(i) for i in range(len(data.frame))]
+    data.frame['index_date']=pd.date_range('2024-01-01',periods=len(data.frame))
+    data.frame['label_available_at']=data.frame.index_date+pd.Timedelta(days=1)
+    data.designs['A']['tabular']=np.tile(data.designs['A']['tabular'][:60],(7,1))
+    fit=np.arange(360)
+    config=config_fixture()
+    config['parameter_grids']['elasticnet']=[{'C':.01,'l1_ratio':0.},{'C':.1,'l1_ratio':.5}]
     spec={'feature_set':'A','model':'elasticnet','name':'A_elasticnet'}
-    before=study.tune_candidate(data,spec,fit,config_fixture())
-    data.frame.loc[90:,'y_phq9']=1-data.frame.loc[90:,'y_phq9']
-    after=study.tune_candidate(data,spec,fit,config_fixture())
+    before=study.tune_candidate(data,spec,fit,config)
+    assert before['selection_status']=='nested_inner_selected'
+    assert before['valid_inner_folds']==2
+    assert len(before['trials'])==2
+    assert all(len(trial['scores'])==2 and not trial['failures'] for trial in before['trials'])
+    data.frame.loc[360:,'y_phq9']=1-data.frame.loc[360:,'y_phq9']
+    after=study.tune_candidate(data,spec,fit,config)
     assert before==after
+
+
+@pytest.mark.parametrize('model,parameters,expected',[
+    ('ridge',[{'alpha':1.},{'alpha':10.}],{'alpha':10.}),
+    ('elasticnet',[{'C':1.},{'C':.01}],{'C':.01}),
+    ('catboost',[{'depth':5},{'depth':3}],{'depth':3}),
+    ('grud',[{'hidden_dim':64,'epochs':40},{'hidden_dim':32,'epochs':20}],{'hidden_dim':32,'epochs':20}),
+])
+def test_complexity_order_is_independent_of_grid_order(model,parameters,expected):
+    for grid in [parameters,parameters[::-1]]:
+        assert min(grid,key=lambda p:study._parameter_complexity(model,p))==expected
+
+
+def test_tuner_one_se_prefers_stronger_ridge_independent_of_grid_order(monkeypatch):
+    from mindwatch.research import monitoring_models
+    data=data_fixture()
+    data.frame=pd.concat([data.frame.iloc[:60].copy() for _ in range(7)],ignore_index=True)
+    data.frame['sample_id']=['synthetic-'+str(i) for i in range(len(data.frame))]
+    data.frame['index_date']=pd.date_range('2024-01-01',periods=len(data.frame))
+    data.frame['label_available_at']=data.frame.index_date+pd.Timedelta(days=1)
+    data.designs['A']['tabular']=np.tile(data.designs['A']['tabular'][:60],(7,1))
+    calls=[]
+    def fit(d,train,calibration,spec,*args,**kwargs):
+        calls.append(spec['parameters']['alpha'])
+        assert not len(calibration)
+        assert max(train)<360
+        return SimpleNamespace(metadata={},predict=lambda d,rows:pd.DataFrame({'score':np.full(len(rows),5.)}))
+    monkeypatch.setattr(monitoring_models,'fit_monitoring_bundle',fit)
+    for grid in [[{'alpha':1.},{'alpha':10.}],[{'alpha':10.},{'alpha':1.}]]:
+        config=config_fixture();config['parameter_grids']['ridge']=grid
+        tuned=study.tune_candidate(data,{'feature_set':'A','model':'ridge','name':'A_ridge'},
+                                   np.arange(360),config,target='phq9',task='regression')
+        assert tuned['selection_status']=='nested_inner_selected'
+        assert tuned['parameters']=={'alpha':10.}
+        assert all(len(trial['scores'])==2 for trial in tuned['trials'])
+    assert len(calls)==8
 
 
 def test_regression_equal_participant_weight_and_abstention():

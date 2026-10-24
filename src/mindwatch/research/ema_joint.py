@@ -11,6 +11,7 @@ from mindwatch.models import person_weights
 from .neural import GRUDEncoder, MaskAwareTCN
 from .mtm_adapter import load_official_mtm, verify_mtm_source
 from .representations import gaps, validate_schedule
+from .sequence_arrays import past_only_delta
 from .neural_comparators import _values, _scores
 
 DOMAINS = ('ema_depression', 'ema_anxiety', 'ema_sleep', 'ema_stress')
@@ -62,7 +63,9 @@ class JointModel:
             raise ValueError('Sequence length changed after fitting')
         mask = np.isfinite(v) & self.seen[None, None, :]
         a = np.where(mask, (v-self.mean)/self.scale, 0).astype(np.float32)
-        delta = gaps(mask)
+        # Legacy checkpoints retain their original input transformation.
+        delta = (past_only_delta(mask) if self.spec.get('delta_units') == 'days'
+                 else gaps(mask))
         delta[:, :, ~self.seen] = 0
         return a, mask.astype(np.float32), delta
 
@@ -130,7 +133,8 @@ def fit(groups, values, targets, p0_values, domain, architecture='grud', *,
     normalizers = torch.tensor(weight.sum(0)/len(fitrows))
     active = torch.tensor(supervised)
     result = JointModel({'architecture': architecture, 'mtm_source_dir': mtm_source_dir,
-                         'sequence_length': values.shape[1]}, mean, scale, den > 0, [], [], domain, supervised)
+                         'sequence_length': values.shape[1], 'delta_units': 'days'},
+                        mean, scale, den > 0, [], [], domain, supervised)
     arrays = result.arrays(values)
     for seed in seeds:
         torch.manual_seed(seed)

@@ -179,6 +179,36 @@ def test_calibration_support_and_threshold():
     assert calibrate(y[:2], p[:2], ids[:2]).status == "insufficient_calibration_support"
 
 
+def test_repeated_rows_do_not_satisfy_core_calibration_person_threshold():
+    y=np.repeat([0.,1.],30);p=np.repeat([.2,.8],30)
+    ids=np.repeat(['synthetic_negative','synthetic_positive'],30)
+    result=calibrate(y,p,ids)
+    assert result.status=='insufficient_calibration_support'
+    np.testing.assert_array_equal(result.predict(p),p)
+
+
+@pytest.mark.parametrize('overlap',[('train','selection'),('train','calibration'),('selection','calibration')])
+def test_training_rejects_every_development_role_overlap(tmp_path,overlap):
+    pairs={role:toy(role) for role in ['train','selection','calibration']}
+    source,target=overlap
+    pairs[target]=(pairs[source][0].copy(),pairs[source][1].copy())
+    events=pd.concat([value[1] for value in pairs.values()]).drop_duplicates(['subject_id','date'])
+    with pytest.raises(ValueError,match='Participant overlap'):
+        train_and_freeze(pairs['train'][0],pairs['selection'][0],pairs['calibration'][0],events,tmp_path/'private_overlap')
+    assert not (tmp_path/'private_overlap').exists()
+
+
+def test_compact_fit_discards_sparse_and_constant_features():
+    from mindwatch.features import E_COLUMNS
+    n=40;x=pd.DataFrame(3.,index=range(n),columns=FEATURE_COLUMNS)
+    x['h_previous_phq9']=np.arange(n)%20
+    x[E_COLUMNS[0]]=np.nan
+    x.loc[:9,E_COLUMNS[0]]=np.arange(10)
+    x[E_COLUMNS[1]]=3.
+    model=fit_head(x,np.arange(n)%2,['synthetic_'+str(i) for i in range(n)],'compact')
+    assert model.columns==('h_previous_phq9',)
+
+
 def test_freeze_then_fixed_evaluation_and_disjointness(frozen):
     folder, test, ema, train = frozen
     locked = (folder/"models.joblib").read_bytes()

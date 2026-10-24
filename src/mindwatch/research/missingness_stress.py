@@ -30,7 +30,10 @@ def mask_windows(windows,scenario,seed=SEED):
 
 def past_window(daily,anchor,length=14):
     """Date-only anchor excluded; exact day grid, never future interpolation."""
-    anchor=pd.Timestamp(anchor);return daily.reindex(pd.date_range(anchor-pd.Timedelta(days=length),periods=length)).to_numpy(float)
+    anchor=pd.Timestamp(anchor)
+    if pd.isna(anchor) or anchor.tz is not None or anchor!=anchor.normalize():
+        raise ValueError('Date-only local anchor required')
+    return daily.reindex(pd.date_range(anchor-pd.Timedelta(days=length),periods=length)).to_numpy(float)
 
 def cluster_change_ci(people,change,n_boot=500):
     # Equal-person mean prediction perturbation; resample whole people.

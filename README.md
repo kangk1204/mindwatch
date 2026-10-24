@@ -124,11 +124,25 @@ implementations and tests, without the private study files they were used with.
 | --- | --- |
 | Read and check inputs | `sources`, `clinical`, `parsing`, `metadata_audit`, `raw_hourly` |
 | Sensor features | `features`, `sensor_engineering`, `hourly_features`, `temporal_features`, `monitoring_data` |
-| Splits and evaluation | `temporal_splits`, `monitoring_splits`, `evaluation`, `benchmarks`, `oof_sensor` |
+| Splits and evaluation | `temporal_splits`, `monitoring_splits`, `evaluation`, `benchmarks`, `oof_sensor`, `feature_selection` |
 | Models | `neural` (GRU-D, TCN and gated fusion), `mtm_adapter`, `sensor_models`, `neural_comparators`, `representations`, `stacking` |
 | Weekly EMA | `ema_personalization`, `ema_sequence`, `ema_joint`, `foundation` |
 | Frozen inference | `routing`, `registry` |
 | Robustness and summaries | `controls`, `missingness_stress`, `analyses`, `associations`, `monitoring_report` |
+
+`feature_selection` compares full H/compact recipes with versions that remove
+survey collection intervals and counts, or EMA response-age inputs. It also
+builds single-input and grouped ablations. Each candidate is refitted; it does
+not remove coefficients from an already fitted model.
+
+Pass only an isolated development-training partition to `select_on_training`.
+The helper creates temporal inner folds with separate training, calibration and
+validation people. It compares AUROC and Brier within one-standard-error bands,
+then prefers fewer inputs. If two valid folds are unavailable, it keeps the
+caller-specified fallback. Freeze that choice before evaluating later data.
+The two-fold selection rule is a heuristic and can be unstable in small samples;
+selection scores are not independent test performance. No study-specific winner,
+cohort split, performance result or fitted checkpoint is included here.
 
 Install the parts you need:
 

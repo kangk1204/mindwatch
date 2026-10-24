@@ -133,6 +133,22 @@ def _specs(config, task='classification', auxiliary=False):
     return output
 
 
+def _parameter_complexity(model, parameters):
+    """Explicit deterministic preference inside the one-standard-error band."""
+    if model == 'ridge':
+        key = (-float(parameters.get('alpha', 10.)),)
+    elif model == 'elasticnet':
+        key = (float(parameters.get('C', .01)), -float(parameters.get('l1_ratio', 0.)))
+    elif model == 'catboost':
+        key = (int(parameters.get('depth', 3)), int(parameters.get('iterations', 300)),
+               -float(parameters.get('l2_leaf_reg', 10.)))
+    elif model in ('grud', 'tcn'):
+        key = (int(parameters.get('hidden_dim', 64)), int(parameters.get('epochs', 40)))
+    else:
+        raise ValueError('Unknown model complexity ordering')
+    return (*key, json.dumps(parameters, sort_keys=True))
+
+
 def tune_candidate(data, spec, fit_rows, config, target='y_phq9', task='classification', mode='known_user'):
     from .monitoring_models import fit_monitoring_bundle
     from .monitoring_splits import monitoring_forward_splits
@@ -189,8 +205,9 @@ def tune_candidate(data, spec, fit_rows, config, target='y_phq9', task='classifi
         result['trials'].append(trial)
     good = [x for x in result['trials'] if 'mean_score' in x]
     if good:
-        best = max(good, key=lambda r: r['mean_score'])
-        chosen = next(x for x in good if x['mean_score'] >= best['mean_score']-best['se_score'])
+        best = min(good, key=lambda r: (-r['mean_score'], _parameter_complexity(spec['model'], r['parameters'])))
+        chosen = min((x for x in good if x['mean_score'] >= best['mean_score']-best['se_score']),
+                     key=lambda x: _parameter_complexity(spec['model'], x['parameters']))
         result.update(parameters=chosen['parameters'], selection_status='nested_inner_selected',
                       mean_score=chosen['mean_score'], se_score=chosen['se_score'])
     return result

@@ -3,7 +3,7 @@ import re
 import pandas as pd
 
 
-def calendar_table(frame, date):
+def calendar_table(frame, date, *, date_only=False):
     if not {"subject_id", date}.issubset(frame) or frame.columns.duplicated().any():
         raise ValueError("Unique columns and participant/date fields required")
     out=frame.copy().reset_index(drop=True)
@@ -15,6 +15,8 @@ def calendar_table(frame, date):
     out[date]=pd.to_datetime(out[date],errors="raise")
     if out[date].isna().any() or out[date].dt.tz is not None:
         raise ValueError("Timezone-resolved local calendar required")
+    if date_only and not out[date].eq(out[date].dt.normalize()).all():
+        raise ValueError("Date-only anchors required; same-day event order is unknown")
     if out.duplicated(["subject_id",date]).any():
         raise ValueError("Resolve duplicate participant/date keys first")
     return out

@@ -229,7 +229,7 @@ def inventory_audio(original_dir: str | Path, known_ids: Mapping[str, str], outp
                             if info.file_size > max_nested_bytes:
                                 raise ValueError('Nested archive exceeds configured byte limit')
                             # Avoid keeping large nested archives wholly in RAM.
-                            with tempfile.SpooledTemporaryFile(max_size=64 * 1024**2) as spool:
+                            with tempfile.TemporaryFile() as spool:
                                 with archive.open(info) as nested:
                                     _bounded_copy(nested, spool, max_nested_bytes)
                                 spool.seek(0)
@@ -314,7 +314,7 @@ def read_recording_bytes(record: Mapping, sources: Mapping, max_bytes: int = 512
                 return finish(stream.read(max_bytes + 1))
         if info.file_size > max_nested_bytes:
             raise ValueError('Nested archive exceeds configured byte limit')
-        with tempfile.SpooledTemporaryFile(max_size=64 * 1024**2) as spool:
+        with tempfile.TemporaryFile() as spool:
             with archive.open(info) as stream:
                 _bounded_copy(stream, spool, max_nested_bytes)
             spool.seek(0)

@@ -16,7 +16,7 @@ def rho(a,b,ids):
 
 def between_within(frame,feature,target,minimum_history=3):
     """Return descriptive correlations; selection and multiple testing stay external."""
-    data=calendar_table(frame,"index_date").sort_values(["subject_id","index_date"])
+    data=calendar_table(frame,"index_date",date_only=True).sort_values(["subject_id","index_date"])
     if feature==target or minimum_history<1:raise ValueError("Distinct variables and positive history required")
     means=data.groupby("subject_id")[[feature,target]].mean()
     between=rho(means[feature].to_numpy(),means[target].to_numpy(),means.index.to_numpy())
