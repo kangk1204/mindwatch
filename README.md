@@ -10,10 +10,19 @@ Git. No real data is needed to install the package or run its tests.
 
 ## What it predicts
 
-The main task is to estimate **PHQ-9 ≥10 at a later assessment**, using information
-available before that assessment. People enter this task when their first
-observed PHQ-9 is at least 5. The first assessment provides history; it is not a
-prediction target. People stay in the study if their symptoms later improve.
+The primary task is to estimate the probability of **at least moderate
+depressive symptoms (PHQ-9 ≥10) at each follow-up assessment**, using only
+information available before that assessment. The outcome is questionnaire-defined
+symptom status. Clinical diagnosis and forecasting over a fixed future interval
+require separate validation.
+
+Recent EMA can include responses up to the day before reassessment. The interval
+between questionnaires therefore does not define how far in advance the model
+makes its prediction.
+
+People enter this task when their first observed PHQ-9 is at least 5. The first
+assessment provides history; it is not a prediction target. People stay in the
+study if their symptoms later improve.
 
 | Model | Information used |
 | --- | --- |
@@ -21,8 +30,7 @@ prediction target. People stay in the study if their symptoms later improve.
 | **compact** | Previous PHQ-9 and recent EMA values for depression, anxiety, sleep and stress |
 
 Both use regularized logistic regression. The compact model compares EMA
-lookbacks of 14, 30, 60 and 90 days. These are questionnaire-based research
-estimates, not clinical diagnoses.
+lookbacks of 14, 30, 60 and 90 days.
 
 There is also a separate EMA baseline function, `ema_forecasts`. It predicts the
 next recorded EMA using either the previous response or a fixed smoothing rule
