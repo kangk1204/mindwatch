@@ -76,7 +76,7 @@ def features_from_history(queries, surveys, ema):
         if not data.subject_id.map(lambda v: isinstance(v, str) and bool(v.strip())).all():
             raise ValueError("History participant keys must be pseudonymous strings")
         data[date_column] = _local_dates(data[date_column])
-    rows, survey_dates, ema_dates = [], [], []
+    rows, survey_dates, ema_dates, reliability = [], [], [], []
     for row in meta.itertuples():
         anchor = row.index_date.normalize()
         prior = sv[sv.subject_id.eq(row.subject_id) & sv.index_date.lt(anchor)].sort_values("index_date")
@@ -96,11 +96,45 @@ def features_from_history(queries, surveys, ema):
             features[f"e_{domain}_median"] = float(np.median(values)) if len(values) else np.nan
         observed = recent[recent[list(DOMAINS)].notna().any(axis=1)]
         ema_dates.append(observed.date.max() if len(observed) else pd.NaT)
+        phq_date = survey_dates[-1]
+        phq_age = float((anchor-phq_date.normalize()).days) if pd.notna(phq_date) else np.nan
+        ema_age = float((anchor-ema_dates[-1].normalize()).days) if len(observed) else np.nan
+        counts = {f"{domain}_observed_days_14d": int(recent[domain].notna().sum())
+                  for domain in DOMAINS}
+        domains = sum(count > 0 for count in counts.values())
+        reliability.append({
+            "input_provenance_status": "history_derived",
+            "prior_phq_age_days": phq_age,
+            "prior_phq_age_band": ("missing_prior_phq" if np.isnan(phq_age) else
+                "within_90_days" if phq_age <= 90 else "91_to_180_days" if phq_age <= 180 else "over_180_days"),
+            "ema_observed_days_14d": len(observed),
+            "ema_observed_domains_14d": domains,
+            "ema_last_age_days_14d": ema_age,
+            "ema_history_status": "none_in_window" if domains == 0 else "all_domains" if domains == len(DOMAINS) else "partial_domains",
+            **counts,
+        })
         rows.append(features)
     x = pd.DataFrame(rows, columns=FEATURES, index=meta.index, dtype=float)
     provenance = pd.DataFrame({"latest_survey_input_date": survey_dates,
                                "latest_ema_input_date": ema_dates}, index=meta.index)
+    descriptive = pd.DataFrame(reliability, index=meta.index)
+    for name in _unavailable_provenance(meta.index):
+        provenance[name] = descriptive.get(name, pd.Series(index=meta.index, dtype=object))
     return meta, x, provenance
+
+
+def _unavailable_provenance(index):
+    """Prepared arrays cannot establish source ages or actual response counts."""
+    return pd.DataFrame({
+        "input_provenance_status": "not_provided",
+        "prior_phq_age_days": np.nan,
+        "prior_phq_age_band": "unknown",
+        "ema_observed_days_14d": np.nan,
+        "ema_observed_domains_14d": np.nan,
+        "ema_last_age_days_14d": np.nan,
+        "ema_history_status": "unknown",
+        **{f"{domain}_observed_days_14d": np.nan for domain in DOMAINS},
+    }, index=index)
 
 
 @dataclass(frozen=True)
@@ -172,6 +206,7 @@ class FrozenLightweight:
     calibration_intercept: float = 0.
     threshold: float | None = None
     calibration_status: str = "unavailable"
+    calibration_slope: float = 1.
 
     def __post_init__(self):
         if not isinstance(self.classifier, NumericHead) or not isinstance(self.change_regressor, NumericHead):
@@ -188,6 +223,11 @@ class FrozenLightweight:
                 raise ValueError("Version and calibration status strings required")
         if not np.isscalar(self.calibration_intercept) or not np.isfinite(self.calibration_intercept):
             raise ValueError("Finite calibration intercept required")
+        if (not isinstance(self.calibration_slope, (int, float, np.integer, np.floating))
+                or isinstance(self.calibration_slope, (bool, complex, np.bool_, np.complexfloating))
+                or not np.isfinite(self.calibration_slope) or self.calibration_slope <= 0):
+            raise ValueError("Positive finite real calibration slope required")
+        object.__setattr__(self, "calibration_slope", float(self.calibration_slope))
         if self.threshold is not None and (not np.isscalar(self.threshold) or not np.isfinite(self.threshold) or not 0 <= self.threshold <= 1):
             raise ValueError("Threshold must be absent or between zero and one")
 
@@ -228,7 +268,8 @@ class FrozenLightweight:
         if policy == "known" and not trained.all():
             raise ValueError("Known policy requires population training membership")
         raw = expit(self.classifier.linear(features))
-        p = raw.copy() if self.calibration_intercept == 0 else expit(logit(np.clip(raw, 1e-7, 1-1e-7)) + self.calibration_intercept)
+        p = raw.copy() if self.calibration_intercept == 0 and self.calibration_slope == 1 else expit(
+            self.calibration_slope*logit(np.clip(raw, 1e-7, 1-1e-7)) + self.calibration_intercept)
         total = np.clip(prior + self.change_regressor.linear(features), 0, 27)
         out = meta.copy()
         out["policy"] = np.where(trained, "known", np.where(calibrated, "calibration_only", "new")) if policy == "auto" else policy
@@ -250,6 +291,9 @@ class FrozenLightweight:
         out["calibration_status"] = np.where(valid, self.calibration_status, "not_applicable")
         out["model_version"] = self.model_version
         out["data_version"] = self.data_version
+        for column, values in _unavailable_provenance(meta.index).items():
+            out[column] = values
+        out["input_reliability_scope"] = "descriptive_availability_not_validated_confidence"
         return out
 
     def predict_from_history(self, queries, surveys, ema, policy="auto"):
@@ -284,11 +328,12 @@ def save_release(model, directory):
         heads[prefix] = {"features": list(head.features), "intercept": head.intercept}
         for field in ("seen", "median", "mean", "scale", "coef"):
             arrays[prefix+"_"+field] = getattr(head, field)
-    spec = {"format_version": 1, "features": list(FEATURES), "window_days": 14,
+    spec = {"format_version": 2, "features": list(FEATURES), "window_days": 14,
             "heads": heads, "training_people": sorted(model.training_people),
             "calibration_people": sorted(model.calibration_people),
             "model_version": model.model_version, "data_version": model.data_version,
             "calibration_intercept": float(model.calibration_intercept),
+            "calibration_slope": model.calibration_slope,
             "threshold": None if model.threshold is None else float(model.threshold),
             "calibration_status": model.calibration_status}
     fd = os.open(folder/"weights.npz", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -317,7 +362,7 @@ def load_release(directory):
         if digest != _digest(folder/name):
             raise ValueError("Frozen release checksum changed")
     spec = json.loads((folder/"model.json").read_text(encoding="utf-8"))
-    if spec.get("format_version") != 1 or tuple(spec.get("features", ())) != FEATURES or spec.get("window_days") != 14:
+    if spec.get("format_version") not in (1, 2) or tuple(spec.get("features", ())) != FEATURES or spec.get("window_days") != 14:
         raise ValueError("Unexpected release format or feature schema")
     heads = {}
     expected = {prefix+"_"+field for prefix in ("classifier", "change_regressor") for field in ("seen", "median", "mean", "scale", "coef")}
@@ -327,6 +372,8 @@ def load_release(directory):
         for prefix in ("classifier", "change_regressor"):
             heads[prefix] = NumericHead(**spec["heads"][prefix], **{
                 field: stored[prefix+"_"+field] for field in ("seen", "median", "mean", "scale", "coef")})
-    return FrozenLightweight(**heads, **{field: spec[field] for field in (
+    if spec["format_version"] == 2 and "calibration_slope" not in spec:
+        raise ValueError("Calibration slope missing from release")
+    return FrozenLightweight(**heads, calibration_slope=spec.get("calibration_slope", 1.), **{field: spec[field] for field in (
         "training_people", "calibration_people", "model_version", "data_version",
         "calibration_intercept", "threshold", "calibration_status")})

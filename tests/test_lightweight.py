@@ -284,3 +284,68 @@ def test_fitted_arrays_never_saved_under_git(frozen, tmp_path):
     with pytest.raises(ValueError, match="outside every Git"):
         save_release(frozen, root/"release")
     assert not (root/"release").exists()
+
+
+def test_reliability_is_descriptive_and_not_a_predictor(histories, frozen):
+    q, s, e = histories
+    full = frozen.predict_from_history(q, s, e)
+    assert full.input_provenance_status.eq('history_derived').all()
+    assert full.prior_phq_age_days.eq(60).all()
+    assert full.prior_phq_age_band.eq('within_90_days').all()
+    assert full.ema_observed_days_14d.eq(3).all()
+    assert full.ema_observed_domains_14d.eq(4).all()
+    assert full.ema_last_age_days_14d.eq(1).all()
+    assert full.ema_history_status.eq('all_domains').all()
+    for domain in DOMAINS:
+        assert full[f'{domain}_observed_days_14d'].eq(3).all()
+    shifted = s.assign(index_date=pd.Timestamp('2019-01-01'))
+    old = frozen.predict_from_history(q, shifted, e)
+    assert old.prior_phq_age_band.eq('over_180_days').all()
+    np.testing.assert_array_equal(full.prediction, old.prediction)
+    np.testing.assert_array_equal(full.predicted_phq9, old.predicted_phq9)
+    assert full.input_reliability_scope.eq('descriptive_availability_not_validated_confidence').all()
+
+
+def test_prepared_features_do_not_invent_reliability(histories, frozen):
+    q, s, e = histories
+    meta, x, _ = features_from_history(q, s, e)
+    out = frozen.predict(meta, x)
+    assert out.input_provenance_status.eq('not_provided').all()
+    assert out.prior_phq_age_band.eq('unknown').all()
+    assert out.ema_history_status.eq('unknown').all()
+    assert out[['prior_phq_age_days', 'ema_observed_days_14d',
+                'ema_observed_domains_14d', 'ema_last_age_days_14d']].isna().all().all()
+
+
+def test_partial_domains_and_missing_histories_are_explicit(histories, frozen):
+    q, s, e = histories
+    partial = e.copy()
+    partial[list(DOMAINS[1:])] = np.nan
+    out = frozen.predict_from_history(q, s, partial)
+    assert out.ema_observed_domains_14d.eq(1).all()
+    assert out.ema_history_status.eq('partial_domains').all()
+    missing = frozen.predict_from_history(q, s.iloc[:0], e.iloc[:0])
+    assert missing.prior_phq_age_days.isna().all()
+    assert missing.prior_phq_age_band.eq('missing_prior_phq').all()
+    assert missing.ema_observed_days_14d.eq(0).all()
+    assert missing.ema_last_age_days_14d.isna().all()
+    assert missing.ema_history_status.eq('none_in_window').all()
+
+
+@pytest.mark.parametrize('value', [0, -1, np.nan, np.inf, True, 1j, '1'])
+def test_calibration_slope_must_be_positive_finite_real(frozen, value):
+    with pytest.raises(ValueError, match='calibration slope'):
+        replace(frozen, calibration_slope=value)
+
+
+def test_slope_calibration_and_roundtrip(histories, frozen, tmp_path):
+    q, s, e = histories
+    model = replace(frozen, calibration_slope=.7)
+    out = model.predict_from_history(q, s, e)
+    expected = expit(.7*logit(np.clip(out.raw_prediction, 1e-7, 1-1e-7))+.2)
+    np.testing.assert_allclose(out.prediction, expected, rtol=0, atol=1e-15)
+    path = tmp_path/'slope_release'
+    save_release(model, path)
+    restored = load_release(path)
+    assert restored.calibration_slope == .7
+    pd.testing.assert_frame_equal(out, restored.predict_from_history(q, s, e))

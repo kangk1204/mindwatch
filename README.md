@@ -39,6 +39,11 @@ and collection-interval features. It supports frozen logistic classification and
 a separate linear change-score head. The estimated change is added to the
 previous PHQ-9 and restricted to the questionnaire's 0–27 range.
 
+An optional frozen history policy can switch to earlier questionnaire features
+when every recent EMA value is missing. Choose that policy using development
+data and fit its probability calibration to the whole routed model. Its
+coefficients, feature selection and validation belong to your own study.
+
 Known and new users can use the same frozen lightweight model. Exposure to
 training or calibration is tracked separately; it does not itself establish how
 well the model will perform for a new user. No fitted model is bundled here.
@@ -107,7 +112,26 @@ recent valid earlier PHQ-9 and actual EMA observations in the preceding 14 days.
 The output includes probability, estimated PHQ-9 total and change, the supplied
 threshold, available inputs and population exposure. Without prior PHQ-9 it
 returns `insufficient_data`. Without EMA it uses the same model's frozen training
-imputation and marks this explicitly. It does not switch to a different H model.
+imputation and marks this explicitly.
+
+`mindwatch.lightweight_policy.FrozenHistoryPolicy` adds an explicitly configured
+survey-history fallback. It reuses the compact path when any recent EMA is
+present and uses its frozen history heads when all recent EMA is absent. Raw
+history may also include earlier `gad7` and `isi` scores. A prepared input to this
+policy must contain the full ordered history/EMA schema; nine compact features
+alone cannot reconstruct earlier survey history. The plain `FrozenLightweight`
+API continues to use imputation and never silently adopts this policy.
+
+Probability calibration supports a positive slope and an intercept on the raw
+logit. Fit these parameters on a separate calibration partition; changing the
+routing policy requires checking its calibration again. Raw probabilities and
+calibrated probabilities are returned separately.
+
+When raw history is supplied, the output also reports the age of the earlier
+PHQ-9 and the number, domains and recency of EMA observations. These describe
+available inputs; they are not a validated confidence score. Prepared features
+without source dates are marked as having unavailable provenance.
+
 Keep predictions and releases private; releases contain fitted arrays and
 participant membership. Loading verifies file and runtime hashes and never
 retrains a model. Preserve an older release with its matching source version.
@@ -174,6 +198,7 @@ implementations and tests, without the private study files they were used with.
 | Read and check inputs | `sources`, `clinical`, `parsing`, `metadata_audit`, `raw_hourly` |
 | Sensor features | `features`, `sensor_engineering`, `hourly_features`, `temporal_features`, `monitoring_data` |
 | Splits and evaluation | `temporal_splits`, `monitoring_splits`, `evaluation`, `benchmarks`, `oof_sensor`, `feature_selection` |
+| Future evaluation lock | `future_validation` |
 | Models | `neural` (GRU-D, TCN and gated fusion), `mtm_adapter`, `sensor_models`, `neural_comparators`, `representations`, `stacking` |
 | Weekly EMA | `ema_personalization`, `ema_sequence`, `ema_joint`, `foundation` |
 | Frozen inference | `routing`, `registry` |
@@ -204,6 +229,13 @@ Brier and total-score MAE before preferring fewer inputs. `state_heads` supplies
 small regularized classification and change-score heads with training-only
 preprocessing. These are reusable methods, not evidence that any one method
 improves performance in a particular cohort.
+
+`future_validation.FutureValidationLock` checks a prospective evaluation manifest
+against frozen model and protocol hashes, a prior-access ledger, and date order.
+For date-only records it requires predictions before the assessment day and
+inputs before the prediction day. Metadata checks alone cannot establish that
+outcomes were never inspected. Maintain access records and distinguish genuinely
+new evaluation data from records already used during development.
 
 Install the parts you need:
 
@@ -276,9 +308,14 @@ software checks do not replace re-evaluation on a study's locked data.
 
 Before committing, run `python tools/check_code_only.py --staged` and review the
 diff. Git hooks and CI reject files outside the code allowlist, including data,
-reports, logs and weights. Tests generate synthetic records at runtime, and CI
-does not upload artifacts. These checks help catch mistakes but cannot recognize
-every sensitive value. Never paste real records into issues, PRs or CI logs.
+reports, logs and weights. The guard also checks recognizable credentials,
+private endpoints, personal-number patterns and literal record or result tables
+embedded in source. It reports categories without echoing matched values.
+Tests generate synthetic records at runtime, and CI does not upload artifacts.
+Install the hooks in each checkout; CI runs after publication. Use GitHub secret
+scanning and push protection as additional layers. These checks cannot recognize
+every sensitive value or encoded dataset, so review the exact staged diff.
+Never paste real records into issues, PRs or CI logs.
 
 The default branch contains code only. Keep backups of earlier research
 workspaces private; do not merge their Git history into this repository.
